@@ -1,3 +1,24 @@
+# ApplyIt (Naukri)
+
+`npm run app` opens the ApplyIt desktop app: Setup (resume → reviewed profile,
+preferences), Running (live state, Pause / Resume / Stop, show/hide browser),
+Applications, Job Details and Reports. The CLI keeps working:
+
+```bash
+node auto-apply-runner.js naukri                                  # DRY (default): never clicks Apply
+node auto-apply-runner.js naukri --test --only=<jobId|jobUrl,…>   # real clicks ONLY for these jobs
+node auto-apply-runner.js naukri --live --confirm-live            # real applications
+```
+
+`naukri-ledger.jsonl` is the only count authority (10/run, 50/day; only reload-verified
+new applications count). Answers come from your own data or are refused — a job that
+needs a human is SKIPPED with the reason, never guessed. Build notes: [docs/PROGRESS.md](docs/PROGRESS.md);
+first real test: [docs/CONTROLLED-TEST.md](docs/CONTROLLED-TEST.md).
+
+The sections below describe the original scripts.
+
+---
+
 # Auto-Apply
 
 Job-application automation for **Naukri**, **Wellfound** and **Indeed**, plus an
