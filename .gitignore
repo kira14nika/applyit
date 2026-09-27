@@ -5,6 +5,7 @@
 *.log
 applications*.csv
 apply-state-*.json
+naukri-ledger.jsonl
 *.png
 
 # saved browser sessions (contain logged-in cookies)
@@ -26,3 +27,8 @@ node_modules/
 
 # runtime flag: pauses automatic window hiding (created by show-windows.js)
 .show-windows
+
+# local backups
+*.backup
+*.before-*
+*.pre-*

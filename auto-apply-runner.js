@@ -102,20 +102,26 @@ const SITES = {
     // collides with the hourly refresh on .naukri-chrome-profile. Re-copy if it logs out.
     profile: '.naukri-apply-profile',
     searches: [
-      'https://www.naukri.com/full-stack-developer-jobs?experience=1',
-      'https://www.naukri.com/software-developer-jobs?experience=1',
-      'https://www.naukri.com/backend-developer-jobs?experience=1',
-      'https://www.naukri.com/mern-stack-developer-jobs?experience=1',
-      'https://www.naukri.com/react-js-developer-jobs?experience=1',
-      'https://www.naukri.com/node-js-developer-jobs?experience=1',
+      'https://www.naukri.com/data-analyst-jobs?experience=3',
+      'https://www.naukri.com/power-bi-developer-jobs?experience=3',
+      'https://www.naukri.com/business-analyst-jobs?experience=3',
+      'https://www.naukri.com/bi-analyst-jobs?experience=3',
+      'https://www.naukri.com/sql-data-analyst-jobs?experience=3',
+      'https://www.naukri.com/data-visualization-jobs?experience=3',
     ],
     loginUrl: 'https://www.naukri.com/nlogin/login',
     // inject only on search pages (…-jobs…), never into the job popup the script drives itself
     injectOn: (url) => /naukri\.com\/[^?]*-jobs/.test(url),
     submittedRe: /✅ applied|DRY_RUN — would click/,
     storeKey: 'autoApplyNaukri',
-    dailyCap: 20,
-    perRun: 10, // 10 per hourly run; the 20/day cap still decides when the day ends
+    dailyCap: 50,
+    perRun: 10, // 10 per hourly run; the 50/day cap still decides when the day ends
+    // naukri-ledger.jsonl is the authority: daily count, per-run count and exclusions
+    // come from it, and only a reload-verified APPLIED line counts.
+    ledger: true,
+    // Keep the search/page position across browser restarts, treat "Next" as progress,
+    // and move to the next search on "No more pages" (see session()).
+    resumePaging: true,
     // ~85-90% of Naukri dev listings are "Apply on company site" — follow them
     // onto the employer's own form instead of skipping them.
     externalApply: true,
@@ -134,10 +140,17 @@ const DAILY_CAP = site.dailyCap || 50;
 const STATE_FILE = path.join(__dirname, `apply-state-${SITE_ARG}.json`);
 const todayKey = new Date().toDateString();
 let dayState = { date: todayKey, count: 0 };
-try { const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8').replace(/^﻿/, '')); if (s.date === todayKey) dayState = s; } catch (e) {}
+// Ledger sites never read or write the state file; the ledger's APPLIED lines are the count.
+const run = site.ledger ? require('./naukri-ledger').startRun({ dailyCap: DAILY_CAP, perRun: site.perRun }) : null;
+if (run) dayState.count = run.today;
+else try { const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8').replace(/^﻿/, '')); if (s.date === todayKey) dayState = s; } catch (e) {}
 const bumpDayCount = () => { dayState.count++; try { fs.writeFileSync(STATE_FILE, JSON.stringify(dayState)); } catch (e) {} };
 // per-run target (site.perRun) capped by whatever is left of the daily allowance
-const TARGET = Math.min(site.perRun || DAILY_CAP, DAILY_CAP - dayState.count);
+const TARGET = run ? run.target : Math.min(site.perRun || DAILY_CAP, DAILY_CAP - dayState.count);
+// ponytail: company-site applies are paused on ledger sites — they are not recorded in
+// the ledger yet, so they could be repeated every run and would escape both caps.
+// Re-enable when external results are written to the ledger (Phase 2C).
+const EXTERNAL_ON = site.externalApply && !run;
 const MAX_RUNTIME_MS = 100 * 60 * 1000;
 const MAX_RESTARTS = 8; // browser gets closed and reopened this many times before giving up
 const IDLE_ROTATE_MS = 4 * 60 * 1000;
@@ -174,16 +187,20 @@ function logApplication(job) {
 // share localStorage with the /jobs feed across navigations (measured 2026-08-12 — the
 // stored list kept resetting to 1), so the script re-opened the same job every cycle.
 const seenJobs = new Set(); // /jobs/<id>-slug of every job already opened this run
-function buildInjection() {
-  const raw = fs
+function buildInjection(max = TARGET) {
+  let raw = fs
     .readFileSync(path.join(__dirname, site.script), 'utf8')
     .replace(/DRY_RUN: true/, `DRY_RUN: ${!LIVE}`)
-    .replace(/MAX_APPLICATIONS: \d+/, `MAX_APPLICATIONS: ${TARGET}`);
+    .replace(/MAX_APPLICATIONS: \d+/, `MAX_APPLICATIONS: ${max}`);
+  // external paused: don't hand control back every few company-site jobs, nobody drains the queue
+  if (!EXTERNAL_ON) raw = raw.replace(/EXTERNAL_BATCH: \d+/, 'EXTERNAL_BATCH: 1000000');
   // the console script reads its personal data from window.__APPLY_CONFIG (from .env),
-  // so no PII lives in the injected script itself
+  // so no PII lives in the injected script itself. Ledger sites also get the excluded
+  // job ids and the ledger's own jobId() so both sides compute identical ids.
   return `(async () => {
     if (window.__aaBusy) return; window.__aaBusy = true;
-    window.__APPLY_CONFIG = ${JSON.stringify({ CV, geminiKey, seen: [...seenJobs] })};
+    window.__APPLY_CONFIG = ${JSON.stringify({ CV, geminiKey, seen: [...seenJobs], ...(run ? run.browserConfig() : {}) })};
+    ${run ? `window.__aaJobId = ${require('./naukri-ledger').jobId.toString()};` : ''}
     try { await ${raw}
     } finally { window.__aaBusy = false; }
   })()`;
@@ -205,7 +222,8 @@ function buildInjection() {
     return;
   }
   const launch = () => chromium.launchPersistentContext(path.join(__dirname, site.profile), {
-    channel: 'chrome',
+    slowMo: 1000,
+    executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     headless: false, // bot checks block headless; headed + minimised instead (same trick as naukri refresh)
     viewport: { width: 1280, height: 900 },
     args: [
@@ -261,11 +279,20 @@ function buildInjection() {
     return;
   }
 
+  if (run) log(`Ledger: ${run.today}/${DAILY_CAP} APPLIED today, ${run.excluded.size} job ids permanently excluded` +
+    (EXTERNAL_ON ? '' : ' — company-site applies paused until they are ledger-recorded'));
   log(`Starting. mode=${LIVE ? 'LIVE' : 'DRY RUN'} target=${TARGET} applications, max ${MAX_RUNTIME_MS / 60000} min`);
   const deadline = Date.now() + MAX_RUNTIME_MS;
   let submitted = 0;
   let lastActivity = Date.now();
   let searchIdx = 0;
+  // resumePaging sites: pagination state lives here, outside session(), so a browser
+  // restart resumes where the search tab was instead of at searches[0] page 1.
+  let resumeUrl = null;          // last results URL the main search tab loaded
+  let mainPageRef = null;        // the current session's search tab
+  let pageAdvanced = false;      // in-page script clicked Next since the last supervisor tick
+  let searchDone = false;        // in-page script reported "No more pages" for this search
+  let searchesExhausted = false; // every search walked to its last page: stop, don't restart
   let pendingJob = null; // details of the job currently being applied to, for the CSV
   const externalQueue = [];              // "Apply on company site" jobs, handled in Node
   // Tabs opened purely to read the site's applied-list. They are on the same origin as
@@ -364,8 +391,86 @@ function buildInjection() {
   const inject = async (page) => {
     if (Date.now() - lastInject < 20000) return;
     lastInject = Date.now();
-    await page.evaluate(buildInjection()).catch(() => {}); // navigation mid-run is normal
+    // ledger sites: the browser only learns what is left of THIS run
+    await page.evaluate(buildInjection(run ? TARGET - submitted : TARGET)).catch(() => {}); // navigation mid-run is normal
   };
+
+  /**
+   * Reload the job in its own tab and read the Apply control. Only an explicit
+   * "Applied" state on that job's own page counts — /myapply/ or success-sounding
+   * text elsewhere never does. Returns 'applied' | 'not-applied' | 'unknown'.
+   */
+  async function verifyNaukriApplied(context, url) {
+    const id = require('./naukri-ledger').jobId(url);
+    let page;
+    try {
+      page = await context.newPage();
+      VERIFY_PAGES.add(page);
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      const state = await page.waitForFunction(() => {
+        // Naukri swaps the Apply button for <span id="already-applied">Applied</span>
+        // inside the apply-button container (seen live 2026-09-28). Visible + exact text only.
+        if ([...document.querySelectorAll('#already-applied, .already-applied')]
+          .some((e) => e.offsetParent !== null && /^applied$/i.test(e.textContent.trim()))) return 'applied';
+        const texts = [...document.querySelectorAll('button, a, [role="button"], #apply-button, [id*="apply" i]')]
+          .filter((b) => b.offsetParent !== null)
+          .map((b) => b.textContent.trim()).filter((t) => t && t.length < 40);
+        if (texts.some((t) => /^applied\b/i.test(t))) return 'applied';
+        if (texts.some((t) => /^apply(\s+now)?$/i.test(t) || /company site/i.test(t))) return 'not-applied';
+        return null;
+      }, null, { timeout: 30000, polling: 500 }).then((h) => h.jsonValue()).catch(() => 'unknown');
+      // redirected (login wall, expired listing) → not this job's page, cannot vouch for it
+      if (/^\d+$/.test(id) && !page.url().includes(id)) return 'unknown';
+      return state;
+    } catch (e) {
+      log(`  (verification error: ${String(e.message || e).split('\n')[0].slice(0, 90)})`);
+      return 'unknown';
+    } finally {
+      if (page) { VERIFY_PAGES.delete(page); await page.close().catch(() => {}); }
+    }
+  }
+
+  /**
+   * window.__aaReport({url, title, company, route, status, reason}) from the browser.
+   * Returns {remaining} for THIS run; the browser loops on it. Counts move only after
+   * reload verification and a successful ledger append.
+   */
+  async function onReport(source, r) {
+    try {
+      r = r || {};
+      if (!LIVE) { // dry run: nothing is written, simulated applies still pace the run
+        run.excluded.add(require('./naukri-ledger').jobId(r.url)); // in memory: don't re-walk it this run
+        if (r.status === 'APPLIED' && r.reason !== 'already-applied') {
+          submitted++;
+          log(`==> ${submitted}/${TARGET} this run (dry run — not recorded)`);
+        } else log(`  (dry run — would record ${r.status}: ${r.reason})`);
+        return { remaining: TARGET - submitted };
+      }
+      if (r.status === 'APPLIED') {
+        const v = await verifyNaukriApplied(source.context, r.url);
+        const already = r.reason === 'already-applied';
+        if (v === 'applied') {
+          const rec = run.record({ ...r, reason: already ? 'already-applied' : 'verified: Applied on reload' }, { count: !already });
+          if (rec.counted) {
+            submitted = run.submitted;
+            dayState.count = run.today;
+            log(`  ✔ verified — job page shows Applied`);
+            log(`==> ${submitted}/${TARGET} this run (${run.today}/${DAILY_CAP} today)`);
+            try { logApplication({ title: r.title, company: r.company, salary: '', skills: matchSkills(r.title || ''), link: rec.url, verified: 'verified', jd: '' }); }
+            catch (e) { log('CSV write failed: ' + e.message); }
+          } else log('  ↩ already applied before this run — recorded, not counted');
+        } else {
+          run.record({ ...r, status: 'FAILED', reason: `unverified (${v}) after: ${r.reason || ''}` });
+          log(`  ❌ not verified (${v}) — recorded FAILED, not counted`);
+        }
+      } else if (r.status === 'FAILED' || r.status === 'SKIPPED') {
+        run.record(r);
+      }
+    } catch (e) {
+      log('ledger/report error (nothing counted): ' + String(e.message || e).split('\n')[0]);
+    }
+    return { remaining: TARGET - submitted };
+  }
 
   function wire(page) {
     page.on('console', (msg) => {
@@ -417,13 +522,23 @@ function buildInjection() {
 
       // "🔗 EXTERNAL | <title> | <href>" — the console script can't cross origins,
       // so queue it and let applyExternal() drive the company site from Node.
+      if (site.resumePaging) {
+        // A Next click is real progress; let the reload inject at once instead of
+        // waiting out the 20s throttle and the next 45s supervisor tick.
+        if (/🌐 Next results page/.test(clean)) { pageAdvanced = true; lastInject = 0; }
+        if (/No more pages/.test(clean)) searchDone = true;
+      }
+
       const ext = clean.match(/🔗 EXTERNAL \| (.+) \| (\S+)/);
+      // ledger sites: don't re-offer a handed-off job to later injections of this run
+      if (ext && run) run.excluded.add(require('./naukri-ledger').jobId(ext[2]));
       if (ext && !externalSeen.has(ext[2])) {
         externalSeen.add(ext[2]);
         externalQueue.push({ title: ext[1].trim(), href: ext[2].trim() });
       }
 
-      if (site.submittedRe.test(text)) {
+      // ledger sites count through __aaReport only; the log line is just a log line
+      if (!run && site.submittedRe.test(text)) {
         submitted++;
         log(`==> ${submitted}/${TARGET} this run (${dayState.count + (LIVE ? 1 : 0)}/${DAILY_CAP} today)`);
         if (LIVE) { // dry runs don't pollute the CSV or the daily count
@@ -442,23 +557,38 @@ function buildInjection() {
         pendingJob = null;
       }
     });
+    // Naukri's Next is a client-side navigation: the URL changes but no 'load' fires
+    // (measured 2026-09-28). framenavigated sees both kinds, so it records the page for
+    // resuming after a restart and, after a Next, injects once the new results settle.
+    if (site.resumePaging) page.on('framenavigated', (frame) => {
+      if (frame !== page.mainFrame() || page !== mainPageRef || VERIFY_PAGES.has(page)) return;
+      const url = page.url();
+      if (!site.injectOn(url) || url === resumeUrl) return;
+      resumeUrl = url;
+      log(`📄 page: ${url}`);
+      if (pageAdvanced) {
+        page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {})
+          .then(() => page.waitForTimeout(1500))
+          .then(() => inject(page)).catch(() => {}); // lastInject was reset by the Next line
+      }
+    });
     page.on('load', async () => {
       if (VERIFY_PAGES.has(page)) return; // verification tab: same origin, must stay untouched
       if (!site.injectOn(page.url())) return;
       lastActivity = Date.now();
       // daily reset of the console script's submit counter (persists in localStorage)
       if (site.storeKey) {
-        await page.evaluate(([key, today]) => {
+        await page.evaluate(([key, today, reset]) => {
           try {
             const s = JSON.parse(localStorage.getItem(key) || '{}');
-            if (s.day !== today) {
+            if (s.day !== today || reset) {
               s.day = today; s.submitted = 0; s.applied = 0;
               s.seen = (s.seen || []).slice(-2000);
               s.seenDry = (s.seenDry || []).slice(-2000); // dry runs keep their own list
               localStorage.setItem(key, JSON.stringify(s));
             }
           } catch (e) {}
-        }, [site.storeKey, new Date().toDateString()]).catch(() => {});
+        }, [site.storeKey, new Date().toDateString(), process.argv.includes('--reset-counter')]).catch(() => {});
       }
       await inject(page);
     });
@@ -469,6 +599,7 @@ function buildInjection() {
   async function session() {
   const ctx = await launch();
   await tuckAway(ctx);
+  if (run) await ctx.exposeBinding('__aaReport', onReport);
 
   // Seed the seen-list from the site's own applied list. The in-page list lives in
   // localStorage that wellfound's role/job pages do not share across navigations, and
@@ -484,7 +615,8 @@ function buildInjection() {
     if (seenJobs.size > before) log(`Seeded ${seenJobs.size - before} already-applied jobs from ${site.appliedListUrl}`);
   }
   const mainPage = ctx.pages()[0] || (await ctx.newPage());
-  searchIdx = 0;
+  mainPageRef = mainPage;
+  if (!site.resumePaging) searchIdx = 0;
   lastActivity = Date.now();
   let fruitless = 0;            // consecutive script cycles that applied to nothing
   let submittedAtCycle = submitted;
@@ -492,7 +624,9 @@ function buildInjection() {
   ctx.pages().forEach(wire);
   ctx.on('page', wire);
 
-  await mainPage.goto(site.searches[0], { waitUntil: 'domcontentloaded', timeout: 60000 });
+  const startUrl = (site.resumePaging && resumeUrl) || site.searches[site.resumePaging ? searchIdx : 0];
+  if (site.resumePaging && resumeUrl) log(`Resuming search ${searchIdx + 1}/${site.searches.length} at ${resumeUrl}`);
+  await mainPage.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
   // not logged in? every flow needs a session — bail with a clear message
   await mainPage.waitForTimeout(8000);
   const bodyText = await mainPage.evaluate('document.body.innerText.slice(0, 3000)').catch(() => '');
@@ -526,7 +660,7 @@ function buildInjection() {
 
     // Work the external queue whenever the in-page script is idle, so the two
     // never drive the browser at the same time.
-    while (site.externalApply && !anyBusy && externalQueue.length && submitted < TARGET && Date.now() < deadline) {
+    while (EXTERNAL_ON && !anyBusy && externalQueue.length && submitted < TARGET && Date.now() < deadline) {
       const job = externalQueue.shift();
       log(`🔗 external: ${job.title}`);
       const res = await applyExternal(ctx, job, { CV, live: LIVE, resumePath: RESUME_PATH, log });
@@ -546,22 +680,33 @@ function buildInjection() {
     }
 
     if (!anyBusy) {
-      if (Date.now() - lastActivity > IDLE_ROTATE_MS) {
+      if (searchDone || Date.now() - lastActivity > IDLE_ROTATE_MS) {
+        if (searchDone) log(`Search ${searchIdx + 1}/${site.searches.length} has no more pages.`);
+        searchDone = false;
+        resumeUrl = null;
         searchIdx++;
-        if (searchIdx >= site.searches.length) { log('All searches exhausted for today.'); break; }
+        if (searchIdx >= site.searches.length) {
+          log('All searches exhausted for today.');
+          if (site.resumePaging) searchesExhausted = true; // nothing left: a restart would only loop
+          break;
+        }
         log(`Rotating to next search: ${site.searches[searchIdx]}`);
+        if (site.resumePaging) lastInject = 0; // the new search's first page injects on load
         await mainPage.goto(site.searches[searchIdx], { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
       } else {
         // Re-injecting forever in a wedged browser looks like progress but isn't:
         // a bot-check, a dead SPA or a stale session produce the same "script ran,
         // applied nothing" cycle every time. After 3 fruitless cycles, hand back to
         // the caller so the browser is closed and reopened fresh.
-        if (submitted === submittedAtCycle) {
+        // A cycle that paged forward is progress too: a run of pages with nothing to
+        // apply to is normal once many jobs are excluded, not a wedged browser.
+        if (submitted === submittedAtCycle && !pageAdvanced) {
           if (++fruitless >= 3) {
             log('No applications in 3 script cycles — closing the browser and reopening.');
             return;
           }
         } else { fruitless = 0; submittedAtCycle = submitted; }
+        pageAdvanced = false;
         await inject(mainPage); // continue with next job on this page
       }
     }
@@ -590,7 +735,7 @@ function buildInjection() {
         continue;
       }
     }
-    if (submitted >= TARGET || Date.now() >= deadline) break;
+    if (submitted >= TARGET || Date.now() >= deadline || searchesExhausted) break;
     if (attempt >= MAX_RESTARTS) { log(`Stopping after ${MAX_RESTARTS} browser restarts — no more jobs to apply to.`); break; }
     await new Promise((r) => setTimeout(r, 15000)); // let the profile lock clear before relaunching
   }
@@ -601,3 +746,13 @@ function buildInjection() {
         `${extStats.failed} failed, ${externalQueue.length} left in queue.`);
   }
 })().catch((e) => { log('FATAL: ' + e.message.split('\n')[0]); process.exit(1); });
+
+
+
+
+
+
+
+
+
+

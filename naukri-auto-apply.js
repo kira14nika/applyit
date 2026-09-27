@@ -50,14 +50,9 @@
 
     // Job titles to apply to (case-insensitive substring match on the job title)
     TITLE_KEYWORDS: [
-      'full stack', 'fullstack', 'full-stack', 'mern', 'backend', 'back end',
-      'frontend', 'front end', 'software engineer', 'software developer',
-      'web developer', 'ai engineer', 'ai developer', 'ai specialist',
-      'ml engineer', 'artificial intelligence', 'machine learning',
-      'generative ai', 'gen ai', 'genai', 'llm', 'agentic',
-      'react', 'node', 'javascript', 'js developer', 'js engineer',
-      'typescript', 'python', 'mobile',
-      'react native', 'sde', 'member of technical staff',
+      'data analyst', 'data analysis', 'power bi', 'business analyst',
+      'bi analyst', 'business intelligence', 'reporting analyst',
+      'data visualization', 'sql analyst', 'mis analyst', 'data reporting',
     ],
     // Skip jobs whose title contains any of these
     TITLE_BLOCKLIST: [
@@ -83,6 +78,7 @@
     [/notice period|when can you (start|join)|start date|joining|how soon/i, CV.noticePeriod],
     [/current .{0,15}(ctc|salary|compensation|annual)/i, CV.currentCTC],          // bare lakhs number
     [/(expected|desired) .{0,15}(ctc|salary|compensation|pay)|salary expectation/i, CV.expectedCTC], // bare lakhs
+    [/machine learning|deep learning|ml experience/i, '3'],
     [/years? of (work |professional |total |relevant )?experience|how (long|many years)|total experience|relevant experience/i, CV.yearsNumber || '1'],
     [/remote|work from home|wfh/i, CV.remoteOk],
     [/reloc|move to|shift to|based out of|work from (our )?office|commute|on-?site/i, CV.relocate],
@@ -94,15 +90,15 @@
     [/portfolio|personal website/i, CV.portfolio],
     [/linkedin|github|portfolio|website|link/i, CV.links],
     [/why (do you want|are you interested|this role|this company|us|join)/i,
-      `I ship production features end to end. ${CV.highlights[0] || ''}. This role matches my stack directly, and I want to keep building products with real ownership.`],
+      `I enjoy turning business data into clear insights and practical decisions. ${CV.highlights[0] || ''}. This role aligns well with my experience in data analysis, Power BI, SQL and business reporting.`],
     [/tell (us|me) about yourself|introduce yourself|about you|summary/i,
       `I'm ${CV.name}, ${CV.currentRole}. ${CV.highlights[0] || ''}. Previously: ${CV.highlights[2] || ''}. ${CV.highlights[3] || ''}.`],
-    [/react|frontend|front-end/i,
-      `Strong frontend experience: React.js, Next.js, Redux, TypeScript and Tailwind CSS, plus React Native.`],
-    [/node|backend|back-end|api/i,
-      `I build production backends daily: Node.js/Express and Python/FastAPI, REST + GraphQL, WebSockets, MongoDB/PostgreSQL/Redis, on cloud with Docker and CI/CD.`],
-    [/\b(ai|llm|ml|machine learning|genai|langchain)\b/i,
-      `AI is a core focus: production GenAI agents, RAG pipelines, tool calling, MCP and multi-agent systems.`],
+    [/power bi|powerbi|business intelligence|bi tool|dashboard|reporting/i,
+      `I have hands-on experience building interactive Power BI dashboards and automated reports to monitor business KPIs and support management decision-making.`],
+    [/sql|database|query/i,
+      `I have hands-on SQL experience, including joins, CTEs, window functions, subqueries, aggregations, data cleaning and business-focused analysis.`],
+    [/python|pandas|numpy|data analysis|data analytics|statistical/i,
+      `I use Python with Pandas and NumPy for data cleaning, exploratory analysis, visualization and analytical modeling.`],
     [/education|degree|university|college|qualification/i, CV.education],
     [/phone|contact number|mobile/i, CV.phone],
     [/^name$|your name|full name|candidate name|first name/i, CV.name],
@@ -179,9 +175,11 @@
     jobCards: '.srp-jobtuple-wrapper, article.jobTuple',
     jobTitleLink: 'a.title',
     // job detail page (inside the popup)
-    applyButtonText: /^apply$/i,
+    applyButtonText: /^apply(?:\s+now)?$/i,
     externalApplyText: /company site/i,
     alreadyAppliedText: /^applied/i,
+    // what Naukri shows INSTEAD of the Apply button once applied (not a button at all)
+    alreadyAppliedMarker: '#already-applied, .already-applied',
     // "you have already applied" deliberately NOT here — it's a duplicate-apply
     // rejection, not a new application; counting it inflated state.applied.
     appliedToast: /successfully applied|applied successfully|application sent|application submitted/i,
@@ -234,7 +232,12 @@
         .filter((o) => o.textContent.trim().length > 0 && o.textContent.trim().length < 60);
       if (options.length) {
         const pick = options.find((o) => YES.test(o.textContent)) || options[0];
-        pick.click();
+        pick.scrollIntoView({ block: 'center', inline: 'center' });
+        pick.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: doc.defaultView }));
+        await sleep(100);
+        pick.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: doc.defaultView }));
+        await sleep(100);
+        pick.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: doc.defaultView }));
         log(`  ☑ picked option: "${pick.textContent.trim().slice(0, 50)}"`);
       } else {
         // 2. Free-text answer into the contenteditable / input
@@ -259,7 +262,8 @@
 
       await sleep(800);
       const send = findButtonByText(drawer, SELECTORS.chatSendText) ||
-                   drawer.querySelector('[class*="send" i]');
+                   findButtonByText(drawer, /^next$|^continue$|^proceed$/i) ||
+                   drawer.querySelector('[class*="send" i], button[type="submit"], input[type="submit"]');
       if (send) send.click();
       else {
         // some inputs submit on Enter
@@ -272,30 +276,42 @@
   }
 
   // ======================= APPLY TO ONE JOB (in popup) =======================
+  let why = ''; // reason for the last `return false`, reported to the runner as FAILED
   async function applyInPopup(popup, job) {
     popup.location.href = job.href;
     const applyBtn = await waitFor(() => {
       const doc = popup.document;
-      if (!doc || doc.readyState !== 'complete') return null;
+      if (!doc || !doc.body) return null;
+      // Until the popup has actually navigated, popup.document is still the PREVIOUS
+      // job — whose button may already read "Applied". Wait for this job's own page.
+      if (/^\d+$/.test(job.id) && !doc.location.href.includes(job.id)) return null;
+      if ([...doc.querySelectorAll(SELECTORS.alreadyAppliedMarker)]
+        .some((e) => visible(e) && /^applied$/i.test(e.textContent.trim()))) return 'applied';
       if (findButtonByText(doc, SELECTORS.externalApplyText)) return 'external';
       const btn = findButtonByText(doc, SELECTORS.applyButtonText) ||
                   doc.querySelector('#apply-button, button[id*="apply" i]');
       if (btn && SELECTORS.alreadyAppliedText.test(btn.textContent.trim())) return 'applied';
       return btn;
-    }, 15000);
+    }, 30000);
 
-    if (!applyBtn) { log('  ⚠ no Apply button found — skipping.'); return false; }
+    if (!applyBtn) { log('  ⚠ no Apply button found — skipping.'); why = 'no Apply button within 30s'; return false; }
     // In-page JS can't follow the handoff to the employer's domain (cross-origin),
     // so hand the job to the Node runner, which applies on the company site itself.
     if (applyBtn === 'external') { log(`  🔗 EXTERNAL | ${job.title} | ${job.href}`); return 'external'; }
-    if (applyBtn === 'applied') { log('  already applied — skipping.'); return false; }
+    if (applyBtn === 'applied') { log('  already applied — skipping.'); return 'already-applied'; }
 
     if (CONFIG.DRY_RUN) {
       log(`  🔍 DRY_RUN — would click: "${applyBtn.textContent.trim()}". Set DRY_RUN=false to apply for real.`);
       return true;
     }
 
-    applyBtn.click();
+    applyBtn.scrollIntoView({ block: 'center', inline: 'center' });
+    applyBtn.focus();
+    applyBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: popup }));
+    await sleep(100);
+    applyBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: popup }));
+    await sleep(100);
+    applyBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: popup }));
 
     // popup.document MUST be re-read on every check. Clicking Apply can navigate the
     // popup, and a navigation replaces the Document object — the old code captured it
@@ -314,7 +330,8 @@
     const confirmed = () => {
       const d = doc();
       if (!d || !d.body) return false;
-      return SELECTORS.appliedToast.test(d.body.textContent) ||
+      return /\/myapply\//i.test(d.location.href) ||
+        SELECTORS.appliedToast.test(d.body.textContent) ||
         (applyBtn.isConnected && SELECTORS.alreadyAppliedText.test(applyBtn.textContent.trim()));
     };
 
@@ -330,10 +347,10 @@
       if (drawer && visible(drawer)) return 'chatbot';
       return confirmed() ? 'applied' : null;
     }, 10000);
-    if (outcome === 'duplicate') { log('  ↩ already applied to this job — not counting it.'); return false; }
+    if (outcome === 'duplicate') { log('  ↩ already applied to this job — not counting it.'); return 'already-applied'; }
     if (outcome === 'chatbot') {
       const ok = await handleChatbot(doc());
-      if (!ok) return false;
+      if (!ok) { why = 'chatbot questionnaire not completed'; return false; }
     }
 
     // Confirm success (toast or Apply button turned into "Applied")
@@ -359,6 +376,7 @@
       const btns = d && d.body ? [...d.querySelectorAll('button')].filter(visible)
         .map((b) => b.textContent.trim()).filter(Boolean).slice(0, 8) : [];
       log('  ⚠ could not confirm success — check the popup.');
+      why = 'no confirmation after clicking Apply';
       log(`  🔬 calibration — url: ${d ? d.location.href.slice(0, 120) : '(no document)'}`);
       log(`  🔬 calibration — visible buttons: ${JSON.stringify(btns)}`);
       log(`  🔬 calibration — page text: "${d && d.body ? d.body.textContent.replace(/\s+/g, ' ').trim().slice(0, 300) : ''}"`);
@@ -367,7 +385,7 @@
   }
 
   // ======================= MAIN LOOP =======================
-  log(`Starting. DRY_RUN=${CONFIG.DRY_RUN}, max=${CONFIG.MAX_APPLICATIONS}, applied so far: ${state.applied}`);
+  log(`Starting. DRY_RUN=${CONFIG.DRY_RUN}, wanted this run=${CONFIG.MAX_APPLICATIONS}, excluded ids: ${(__CFG.excluded || []).length}`);
   if (!/naukri\./.test(location.hostname)) { log('⚠ Open a naukri.com job search first.'); return; }
 
   // Naukri renders the results list client-side, so the cards are not in the DOM
@@ -392,8 +410,21 @@
     return;
   }
 
+  // Ledger mode (runner): Node owns every count. The browser only knows how many
+  // verified applications are still wanted THIS run and which job ids are off-limits
+  // (permanent APPLIED/SKIPPED + this run's attempts). state.applied is no longer used.
+  const EXCLUDED = new Set(__CFG.excluded || []);
+  const idOf = window.__aaJobId || ((u) => u);
+  let remaining = CONFIG.MAX_APPLICATIONS;
+  const report = async (job, status, reason) => {
+    if (typeof window.__aaReport !== 'function') return null; // pasted by hand: no runner
+    try {
+      return await window.__aaReport({ url: job.href, title: job.title, company: job.company, route: 'naukri', status, reason });
+    } catch (e) { log('  report to runner failed:', e.message); return null; }
+  };
+
   let extQueued = 0;
-  while (state.applied < CONFIG.MAX_APPLICATIONS) {
+  while (remaining > 0) {
     const cards = [...document.querySelectorAll(SELECTORS.jobCards)].filter(visible);
     let job = null;
 
@@ -402,9 +433,10 @@
       const link = card.querySelector(SELECTORS.jobTitleLink);
       if (!link) continue;
       const title = link.textContent.replace(/\s+/g, ' ').trim();
-      if (state[SEEN_KEY].includes(link.href)) { nSeen++; continue; }
+      if (EXCLUDED.has(idOf(link.href))) { nSeen++; continue; }
       if (!titleOk(title)) { nFiltered++; continue; }
-      job = { href: link.href, title, card };
+      const company = (card.querySelector('.comp-name, [class*="comp-name" i]')?.textContent || '').trim();
+      job = { href: link.href, id: idOf(link.href), title, company, card };
       break;
     }
 
@@ -414,7 +446,7 @@
       // Split the two very different reasons for "nothing to do here": jobs already
       // visited on an earlier run vs jobs the title filter rejected. Reporting a
       // combined "0 match" made an exhausted page look like a broken filter.
-      log(`(this page: ${cards.length} cards — ${nSeen} already seen, ${nFiltered} filtered out; sample: ${sample})`);
+      log(`(this page: ${cards.length} cards — ${nSeen} excluded (applied/skipped/tried), ${nFiltered} filtered out; sample: ${sample})`);
       const nextBtn = findButtonByText(document, SELECTORS.nextPageText);
       if (nextBtn) {
         log('🌐 Next results page — the page will reload. PASTE THE SCRIPT AGAIN when it loads.');
@@ -426,17 +458,23 @@
       break;
     }
 
-    state[SEEN_KEY].push(job.href);
+    EXCLUDED.add(job.id); // never twice in one injection, whatever the outcome
+    state[SEEN_KEY].push(job.href); // legacy; no longer read for exclusion
     saveState();
     log(`▶ Applying: ${job.title} | ${job.href}`);
     job.card.scrollIntoView({ block: 'center' });
 
+    why = '';
     const ok = await applyInPopup(popup, job);
     // Strictly true: 'external' is truthy and must not be counted as an application.
-    if (ok === true && !CONFIG.DRY_RUN) {
-      state.applied++;
-      saveState();
-      log(`  progress: ${state.applied}/${CONFIG.MAX_APPLICATIONS}`);
+    // A claim is only a claim: the runner re-verifies it and answers with what is left.
+    if (ok === true || ok === 'already-applied') {
+      const v = await report(job, 'APPLIED', ok === true ? (CONFIG.DRY_RUN ? 'dry-run' : 'confirmed in page') : 'already-applied');
+      if (v) remaining = v.remaining;
+      else if (ok === true) remaining--; // no runner: count locally
+      log(`  remaining this run: ${remaining}`);
+    } else if (ok === false) {
+      await report(job, 'FAILED', why || 'unknown');
     }
     if (ok === 'external') {
       extQueued++;
@@ -457,5 +495,5 @@
   popup.close();
   log(CONFIG.DRY_RUN
     ? 'DRY RUN finished — nothing was actually sent. Set CONFIG.DRY_RUN = false and re-paste to apply for real.'
-    : `Finished. Applied to ${state.applied} jobs total. Clear localStorage["${STORE_KEY}"] to reset the counter.`);
+    : `Finished. ${remaining} still wanted this run.`);
 })();
