@@ -31,6 +31,11 @@ function normalize(p = {}) {
     includeKeywords: list(p.includeKeywords),
     excludeKeywords: list(p.excludeKeywords),
     limits: { perRun: clampInt(p.limits?.perRun, MAX.perRun), daily: clampInt(p.limits?.daily, MAX.daily) },
+    // AI match threshold — OFF by default, and advisory even when on (flags, never skips)
+    matching: {
+      thresholdEnabled: p.matching?.thresholdEnabled === true,
+      threshold: Math.min(100, Math.max(0, Math.round(num(p.matching?.threshold) ?? 60))),
+    },
   };
 }
 

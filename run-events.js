@@ -50,6 +50,8 @@ function createBus({ runId, mode, send = typeof process.send === 'function' ? (m
     if (data.page !== undefined) snapshot.page = data.page;
     if (data.counts) Object.assign(snapshot.counts, data.counts);
     if (data.text !== undefined) snapshot.phaseText = data.text;
+    if (state === 'checking-job') { snapshot.match = null; snapshot.question = null; }
+    if (data.match) snapshot.match = data.match;
     if (state === 'generating-answer') snapshot.question = { question: data.question, answer: null };
     if (state === 'filling-answer' && snapshot.question) snapshot.question.answer = data.answer;
     if (TALLY[state]) {
@@ -70,6 +72,8 @@ function createTracker({ bus, write }) {
     return jobs.get(id);
   };
   return {
+    has: (id) => jobs.has(id),
+    details: (id) => (jobs.has(id) ? jobs.get(id).details : null),
     /** Merge job facts (title, company, location, salary, experience, description, search, page). */
     touch(id, details = {}) { if (id) Object.assign(get(id).details, details); },
     /** Emit a state and add it to the job's timeline. */

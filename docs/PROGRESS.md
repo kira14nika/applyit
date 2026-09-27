@@ -124,4 +124,24 @@ Not verified: AI extraction against a real Gemini model (no key in `.env`). The
 dependency audit reports 1 high issue in `brace-expansion`, a pre-existing transitive
 dependency of playwright-extra — not introduced here and left untouched.
 
-## Next — Phase 6: AI matching (advisory)
+## Phase 6 — AI matching (advisory) ✅
+
+| What | Where |
+|---|---|
+| Rule match (offline, always): profile skills found in the job text → matched; the job's own skill tags not in the profile → missing (never guessed from prose); experience range fit; preferred-location fit → score 0-100, decision, reasons | `job-match.js` `ruleMatch` |
+| AI match (when `GEMINI_KEY` is set): Gemini score/decision/reasons; every matched skill must appear in both the job and the profile, every missing skill in the job and not the profile; bad score / AI error → rule result kept (`aiError` noted) | `aiMatch` |
+| Runs when the job page opens (description available) → `ai-matching` event → stored in the job's history record → Running page, Job Details, Applications "Match" column, Reports average | runner `startMatch`, `run-events.js`, app |
+| **Advisory only**: `startMatch` never records, excludes or skips. Threshold setting (Setup) defaults OFF; when on it only flags `belowThreshold` | `applyThreshold`, `preferences.matching` |
+
+Tests: `job-match.test.js` (rule scoring, unknown without skills, AI grounding drops
+invented skills, off-contract/offline AI → rules, threshold off by default and only
+flags, source check that startMatch cannot gate, experience parsing).
+
+Verified by a DRY run: history recorded `match {score 72, good-match, 10 matched,
+5 missing (from the card's own tags), source rules}` in the timeline
+checking-job → opening-application → ai-matching → would-apply.
+Not verified: the Gemini match path against a real model (no key).
+
+## What's left
+See the final report and [CONTROLLED-TEST.md](CONTROLLED-TEST.md). Nothing in this
+build clicked Apply: TEST and LIVE are implemented and unit-tested but have not been run.

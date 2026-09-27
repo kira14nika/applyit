@@ -89,6 +89,10 @@ function renderSnapshot(s, ev) {
   $('cur-today').textContent = `${s.counts.today} / ${s.counts.dailyCap}`;
   const t = s.tallies;
   $('tallies').textContent = `Applied ${t.applied} · Already applied ${t.alreadyApplied} · Skipped ${t.skipped} · Failed ${t.failed} · Deferred ${t.deferred}` + (t.wouldApply ? ` · Would apply (dry) ${t.wouldApply}` : '');
+  const m = s.match;
+  $('cur-match').textContent = !m ? '—' : m.score == null ? 'unknown — add skills to your profile in Setup'
+    : `${m.score}% ${m.decision} (${m.source})${m.belowThreshold ? ' · below your threshold — advisory only' : ''}` +
+      ` · matched: ${(m.matchedSkills || []).join(', ') || '—'} · missing: ${(m.missingSkills || []).join(', ') || '—'}`;
   $('cur-question').textContent = s.question ? s.question.question : '—';
   $('cur-answer').textContent = s.question ? (s.question.answer ?? '(generating…)') : '—';
   const last = s.lastResult ? `${label(s.lastResult.state)} — ${(s.lastResult.job && s.lastResult.job.title) || ''} ${(s.lastResult.job && s.lastResult.job.company) ? '· ' + s.lastResult.job.company : ''}${s.lastResult.reason ? ' (' + s.lastResult.reason + ')' : ''}` : '—';

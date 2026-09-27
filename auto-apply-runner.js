@@ -590,6 +590,8 @@ function buildInjection(max = TARGET) {
     r = r || {};
     const rid = require('./naukri-ledger').jobId(r.url);
     tracker?.touch(rid, { url: r.url, title: r.title, company: r.company });
+    // let an in-flight AI match land in this job's history (bounded; never blocks the outcome)
+    if (pendingMatch.has(rid)) await Promise.race([pendingMatch.get(rid), new Promise((res) => setTimeout(res, 15000))]);
     try {
       if (!LIVE) { // dry run: nothing is written, simulated applies still pace the run
         run.excluded.add(rid); // in memory: don't re-walk it this run
@@ -696,7 +698,29 @@ function buildInjection(max = TARGET) {
     if (e.details || e.job) tracker.touch(jid, { ...(e.job || {}), ...(e.details || {}) });
     const { state, ...data } = e;
     tracker.event(jid, state, data);
+    if (state === 'opening-application') startMatch(jid);
     return true;
+  }
+
+  // ---- AI matching (Phase 6) — ADVISORY ONLY: stored and shown, never gates a job ----
+  const jobMatch = require('./job-match');
+  const pendingMatch = new Map();
+  function startMatch(jid) {
+    const d = tracker.details(jid);
+    if (!d) return;
+    const job = { title: d.title, company: d.company, location: d.location, experience: d.experience,
+      salary: d.salary, tags: d.tags || [], description: d.description || '' };
+    const record = (m) => {
+      if (!tracker.has(jid)) return; // job already finished
+      tracker.touch(jid, { match: m });
+      tracker.event(jid, 'ai-matching', { match: m, text: m.score == null ? 'match unknown (no profile skills)'
+        : `match ${m.score}% (${m.source}) — ${m.decision}${m.belowThreshold ? ' — below your threshold (advisory only, still processed)' : ''}` });
+    };
+    record(jobMatch.applyThreshold(jobMatch.ruleMatch(job, FACTS, PREFS), PREFS));
+    if (geminiKey) {
+      pendingMatch.set(jid, jobMatch.aiMatch(job, FACTS, PREFS, { apiKey: geminiKey, model: geminiModel || answerEngine.DEFAULT_MODEL })
+        .then((m) => record(jobMatch.applyThreshold(m, PREFS))).catch(() => {}).finally(() => pendingMatch.delete(jid)));
+    }
   }
 
   function wire(page) {

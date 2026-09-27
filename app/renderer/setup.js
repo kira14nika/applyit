@@ -75,6 +75,8 @@
       row('Title must NOT include', area('s-excl', (p.excludeKeywords || []).join('\n'), 'one per line (added to the built-in blocklist)', 2)),
       row(`Max per run (≤ ${max.perRun})`, text('s-perrun', p.limits?.perRun ?? max.perRun)),
       row(`Max per day (≤ ${max.daily})`, text('s-daily', p.limits?.daily ?? max.daily)),
+      row('AI match threshold', h('div', {}, chk('s-thr-on', 'Flag jobs below', p.matching?.thresholdEnabled), text('s-thr', p.matching?.threshold ?? 60),
+        h('div', { class: 'note', text: 'Off by default. Advisory only in this version: a low score is flagged in Running / Job Details, the job is never skipped because of it.' }))),
       h('div', { class: 'k', style: 'margin-top:10px', text: 'Naukri searches that will be used' }), h('ul', { id: 's-searches', class: 'timeline' }),
       h('button', { class: 'primary', text: 'Save preferences', onclick: savePrefs }), h('span', { id: 's-status', class: 'muted', style: 'margin-left:10px' }));
   }
@@ -86,6 +88,7 @@
       salary: { min: $('s-salmin').value, max: $('s-salmax').value }, experience: { min: $('s-expmin').value, max: $('s-expmax').value },
       includeKeywords: lines($('s-incl').value), excludeKeywords: lines($('s-excl').value),
       limits: { perRun: $('s-perrun').value, daily: $('s-daily').value },
+      matching: { thresholdEnabled: $('s-thr-on').checked, threshold: $('s-thr').value },
     };
   }
   async function preview() {
