@@ -4,15 +4,25 @@
   "main": "naukri-profile-refresh.js",
   "scripts": {
     "refresh": "node naukri-profile-refresh.js",
-    "login": "node naukri-profile-refresh.js login"
+    "login": "node naukri-profile-refresh.js login",
+    "app": "electron app/main.js",
+    "app:selftest": "electron app/main.js --selftest",
+    "test": "node --test"
   },
-  "keywords": ["naukri", "playwright", "automation"],
+  "keywords": [
+    "naukri",
+    "playwright",
+    "automation"
+  ],
   "author": "Ankit Baghel",
   "license": "ISC",
-  "description": "Keeps your Naukri profile recently-updated by toggling the resume headline on a schedule",
+  "description": "ApplyIt — Naukri job-application assistant (desktop app + CLI runner)",
   "dependencies": {
     "playwright-core": "^1.61.1",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"
+  },
+  "devDependencies": {
+    "electron": "^44.4.5"
   }
 }

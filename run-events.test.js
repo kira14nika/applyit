@@ -40,6 +40,16 @@ test('tallies: already-applied is separate from applied; counts are copied, not 
   assert.strictEqual(bus.snapshot.lastResult.state, 'failed', 'last result is the most recent outcome');
 });
 
+test('paused stays paused until resumed, whatever else is emitted', () => {
+  const bus = createBus({ runId: 'r6', mode: 'DRY', send: null });
+  bus.emitState('paused', {});
+  bus.emitState('waiting', {});
+  bus.emitState('would-apply', {});
+  assert.strictEqual(bus.snapshot.paused, true);
+  bus.emitState('resumed', {});
+  assert.strictEqual(bus.snapshot.paused, false);
+});
+
 test('page states are a subset of the known states', () => {
   for (const s of PAGE_STATES) assert.ok(STATES.includes(s), s);
   assert.ok(!PAGE_STATES.includes('application-verified'), 'only Node may declare an application verified');

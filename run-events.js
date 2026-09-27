@@ -30,7 +30,7 @@ function createBus({ runId, mode, send = typeof process.send === 'function' ? (m
   const em = new EventEmitter();
   let seq = 0;
   const snapshot = {
-    runId, mode, state: 'starting', phaseText: '', job: null, search: null, page: null,
+    runId, mode, state: 'starting', paused: false, phaseText: '', job: null, search: null, page: null,
     counts: { run: 0, target: 0, today: 0, dailyCap: 0 },
     tallies: { applied: 0, alreadyApplied: 0, skipped: 0, failed: 0, deferred: 0, wouldApply: 0 },
     question: null, lastResult: null, updatedAt: null,
@@ -41,6 +41,10 @@ function createBus({ runId, mode, send = typeof process.send === 'function' ? (m
     const ev = { runId, seq: ++seq, ts: new Date().toISOString(), state, ...data };
     snapshot.state = state;
     snapshot.updatedAt = ev.ts;
+    // paused is a condition, not just the latest event: later events (the job in flight
+    // finishing, the page's own wait) must not make a paused run look like it is running
+    if (state === 'paused') snapshot.paused = true;
+    if (state === 'resumed' || state === 'stopped' || state === 'completed') snapshot.paused = false;
     if (data.job) snapshot.job = { ...(snapshot.job || {}), ...data.job };
     if (data.search !== undefined) snapshot.search = data.search;
     if (data.page !== undefined) snapshot.page = data.page;

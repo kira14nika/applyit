@@ -78,4 +78,26 @@ checking-job → opening-application → would-apply → waiting → deferred, a
 records carried real job details. Not verified: submitting / generating-answer /
 filling-answer / verifying / application-verified / skipped events (need a click).
 
-## Next — Phase 4: desktop app (Electron)
+## Phase 4 — Desktop app (Electron) ✅
+
+`npm run app` opens ApplyIt. `npm run app:selftest` runs the end-to-end self-test.
+
+| What | Where |
+|---|---|
+| Electron main forks the unchanged CLI runner (`child_process.fork`, Electron-as-Node) and talks over IPC; the app only builds the flags a user would type, so every safety rail stays in the runner | `app/main.js`, `app/run-args.js` |
+| Preload with `contextBridge`; `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true`; CSP `default-src 'self'`; renderer inserts data with `textContent` only | `app/preload.js`, `app/renderer/*` |
+| Pages: Dashboard, Running (live state, job, job ID, search, results page URL, question/answer, run X/target, today X/50, tallies, events, runner log), Applications (ledger + deferred rows, history details; filters All / Applied / Already applied / Skipped / Failed / Deferred / Today / date range / company / title / platform), Job Details (ledger lines, per-run timeline, questions + answers + evidence, intervention, verification, captured description), Reports (outcomes, daily activity, intervention categories, failure reasons, runs), Settings (mode) | `app/renderer/*`, `app/data.js` |
+| Pause (the page awaits `__aaMayStartJob` before each new job/page; the job in flight finishes and is recorded; paused time doesn't eat the 100-min deadline), Resume (continues the current page), Stop (the job in flight is verified/recorded first, then Chrome closes; the runner exits 0), Show/Hide browser (reuses `window-utils` + the `.show-windows` flag) | runner control block, `app/main.js` |
+| Mode selector: DRY default (resets every launch), TEST needs job IDs/URLs (validated), LIVE needs the word LIVE typed → red banner | Settings page, `run-args.js` |
+| Closing the window stops a run cleanly; if the app process disappears the runner stops itself | `before-quit`, runner `disconnect` handler |
+
+Found and fixed by the self-test: a paused run could show "WAITING" because later
+events overwrote the displayed state — `paused` is now a sticky snapshot flag.
+In DRY the run counter is labelled "simulated, nothing submitted".
+
+Tests: `app-data.test.js` (applications/job details/reports views; mode → CLI flags).
+Self-test (VERIFIED): the real window + a forked DRY run — starting, searching,
+loading-results, checking-job, opening-application, would-apply, paused (UI shows
+PAUSED), resumed, stopped (UI shows STOPPED), runner exit 0, no Chrome left.
+
+## Next — Phase 5: resume profile + setup

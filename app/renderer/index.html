@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+  <title>ApplyIt</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside class="nav">
+    <div class="brand">ApplyIt <span class="platform">Naukri</span></div>
+    <button class="nav-btn active" data-page="dashboard">Dashboard</button>
+    <button class="nav-btn" data-page="setup">Setup</button>
+    <button class="nav-btn" data-page="running">Running</button>
+    <button class="nav-btn" data-page="applications">Applications</button>
+    <button class="nav-btn" data-page="reports">Reports</button>
+    <button class="nav-btn" data-page="settings">Settings</button>
+    <div class="nav-mode">Mode: <b id="nav-mode">DRY</b></div>
+  </aside>
+
+  <main>
+    <div id="live-banner" class="live-banner hidden">LIVE — REAL APPLICATIONS WILL BE SUBMITTED</div>
+
+    <!-- DASHBOARD -->
+    <section id="page-dashboard" class="page">
+      <div class="page-head">
+        <h1>Dashboard</h1>
+        <div class="head-actions">
+          <span class="badge" id="dash-state">IDLE</span>
+          <button id="dash-start" class="primary">Start run</button>
+        </div>
+      </div>
+      <div class="cards">
+        <div class="card"><div class="k">Run</div><div class="v" id="dash-run">0 / 10</div></div>
+        <div class="card"><div class="k">Today</div><div class="v" id="dash-today">– / 50</div></div>
+        <div class="card ok"><div class="k">Applied</div><div class="v" id="dash-applied">0</div></div>
+        <div class="card"><div class="k">Already applied</div><div class="v" id="dash-already">0</div></div>
+        <div class="card warn"><div class="k">Skipped</div><div class="v" id="dash-skipped">0</div></div>
+        <div class="card bad"><div class="k">Failed</div><div class="v" id="dash-failed">0</div></div>
+        <div class="card"><div class="k">Deferred (company site)</div><div class="v" id="dash-deferred">0</div></div>
+      </div>
+      <div class="panel">
+        <div class="k">Current status</div>
+        <div id="dash-phase" class="big-text">Not running</div>
+        <div class="k" style="margin-top:12px">Last result</div>
+        <div id="dash-last">—</div>
+      </div>
+      <p class="note">Run and Applied count only NEW applications that ApplyIt submitted and then verified by reloading the job. Already-applied jobs are shown separately and never counted.</p>
+    </section>
+
+    <!-- SETUP (phase 5) -->
+    <section id="page-setup" class="page hidden">
+      <div class="page-head"><h1>Setup</h1></div>
+      <div id="setup-root" class="panel">Setup is loading…</div>
+    </section>
+
+    <!-- RUNNING -->
+    <section id="page-running" class="page hidden">
+      <div class="page-head">
+        <h1>Running</h1>
+        <div class="head-actions">
+          <button id="btn-start" class="primary">Start</button>
+          <button id="btn-pause">Pause</button>
+          <button id="btn-resume">Resume</button>
+          <button id="btn-stop" class="danger">Stop</button>
+          <button id="btn-show">Show browser</button>
+          <button id="btn-hide">Hide browser</button>
+        </div>
+      </div>
+      <div class="running-grid">
+        <div class="panel">
+          <div class="k">State</div>
+          <div class="state" id="run-state">IDLE</div>
+          <div id="run-phase" class="muted">—</div>
+          <div class="kv"><span>Job</span><b id="cur-job">—</b></div>
+          <div class="kv"><span>Job ID</span><span id="cur-jobid">—</span></div>
+          <div class="kv"><span>Search</span><span id="cur-search">—</span></div>
+          <div class="kv"><span>Results page</span><span id="cur-page" class="url">—</span></div>
+          <div class="kv"><span>Run</span><b id="cur-run">0 / 0</b></div>
+          <div class="kv"><span>Today</span><b id="cur-today">– / 50</b></div>
+          <div class="kv"><span>Results</span><span id="tallies">—</span></div>
+        </div>
+        <div class="panel">
+          <div class="k">Current question</div>
+          <div id="cur-question" class="muted">—</div>
+          <div class="k" style="margin-top:10px">Answer</div>
+          <div id="cur-answer" class="muted">—</div>
+          <div class="k" style="margin-top:10px">Last result</div>
+          <div id="cur-last" class="muted">—</div>
+        </div>
+      </div>
+      <div class="running-grid">
+        <div class="panel"><div class="k">Recent events</div><ol id="event-list" class="events"></ol></div>
+        <div class="panel"><div class="k">Runner log</div><pre id="log" class="log"></pre></div>
+      </div>
+    </section>
+
+    <!-- APPLICATIONS -->
+    <section id="page-applications" class="page hidden">
+      <div class="page-head"><h1>Applications</h1><button id="apps-refresh">Refresh</button></div>
+      <div class="filters">
+        <div class="chips" id="app-chips">
+          <button data-f="ALL" class="chip active">All</button>
+          <button data-f="APPLIED" class="chip">Applied</button>
+          <button data-f="ALREADY_APPLIED" class="chip">Already applied</button>
+          <button data-f="SKIPPED" class="chip">Skipped</button>
+          <button data-f="FAILED" class="chip">Failed</button>
+          <button data-f="DEFERRED" class="chip">Deferred</button>
+          <button data-f="TODAY" class="chip">Today</button>
+        </div>
+        <label>From <input type="date" id="f-from"></label>
+        <label>To <input type="date" id="f-to"></label>
+        <input type="search" id="f-company" placeholder="Company">
+        <input type="search" id="f-title" placeholder="Job title">
+        <select id="f-platform"><option>Naukri</option></select>
+      </div>
+      <table class="table">
+        <thead><tr><th>Date</th><th>Job</th><th>Company</th><th>Location</th><th>Status</th><th>Reason</th><th>Match</th><th>Platform</th></tr></thead>
+        <tbody id="apps-body"></tbody>
+      </table>
+      <p id="apps-empty" class="muted hidden">No jobs match these filters.</p>
+    </section>
+
+    <!-- JOB DETAILS -->
+    <section id="page-job" class="page hidden">
+      <div class="page-head"><h1 id="job-title">Job</h1><button id="job-back">← Applications</button></div>
+      <div id="job-root"></div>
+    </section>
+
+    <!-- REPORTS -->
+    <section id="page-reports" class="page hidden">
+      <div class="page-head"><h1>Reports</h1><button id="reports-refresh">Refresh</button></div>
+      <div id="reports-root"></div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section id="page-settings" class="page hidden">
+      <div class="page-head"><h1>Settings</h1></div>
+      <div class="panel">
+        <div class="k">Mode</div>
+        <label class="radio"><input type="radio" name="mode" value="DRY" checked> <b>DRY RUN</b> — searches and opens jobs, never clicks Apply, writes nothing to the ledger.</label>
+        <label class="radio"><input type="radio" name="mode" value="TEST"> <b>TEST</b> — real Apply clicks ONLY for the job IDs / URLs below.</label>
+        <textarea id="test-ids" placeholder="Job IDs or Naukri job URLs, one per line" rows="3" disabled></textarea>
+        <label class="radio"><input type="radio" name="mode" value="LIVE"> <b class="red">LIVE</b> — real applications. Type LIVE to confirm:</label>
+        <input id="live-confirm" placeholder="type LIVE" disabled>
+        <p id="mode-error" class="error"></p>
+        <label class="check"><input type="checkbox" id="show-browser"> Show the browser window during runs (debug)</label>
+        <p class="note">The mode resets to DRY every time ApplyIt starts. Limits: at most 10 verified new applications per run, 50 per day.</p>
+      </div>
+    </section>
+  </main>
+  <script src="renderer.js"></script>
+</body>
+</html>

@@ -362,6 +362,56 @@ function buildInjection(max = TARGET) {
   emit('starting', { counts: { run: 0, target: TARGET, today: run ? run.today : dayState.count, dailyCap: DAILY_CAP },
     text: `${MODE} run, target ${TARGET}` });
   const deadline = Date.now() + MAX_RUNTIME_MS;
+
+  // ---- Pause / Resume / Stop (desktop app → child_process IPC {type:'control', action}) ----
+  // Pause: no NEW job starts (the page asks __aaMayStartJob before each one); the job in
+  //   flight finishes and is recorded normally. Paused time does not eat the deadline.
+  // Resume: continue exactly where the page is (no search restart).
+  // Stop: no new job; if a job is in flight its outcome is verified/recorded first, then
+  //   the browser closes. Nothing is ever counted because of a stop.
+  let paused = false, pausedAt = 0, pausedTotal = 0, stopRequested = false;
+  let jobInFlight = false, currentCtx = null, wake = null;
+  const pastDeadline = () => Date.now() >= deadline + pausedTotal + (paused ? Date.now() - pausedAt : 0);
+  const nap = (ms) => new Promise((r) => { const t = setTimeout(r, ms); wake = () => { clearTimeout(t); r(); }; });
+  const closeForStop = () => { if (currentCtx) currentCtx.close().catch(() => {}); if (wake) wake(); };
+  const control = {
+    pause() {
+      if (paused || stopRequested) return;
+      paused = true; pausedAt = Date.now();
+      log(`⏸ paused${jobInFlight ? ' — the current job will finish and be recorded first' : ''}`);
+      emit('paused', { text: jobInFlight ? 'pausing after the current job' : 'paused' });
+    },
+    resume() {
+      if (!paused) return;
+      paused = false; pausedTotal += Date.now() - pausedAt;
+      log('▶ resumed');
+      emit('resumed', { text: 'resumed where it left off' });
+    },
+    stop() {
+      if (stopRequested) return;
+      stopRequested = true;
+      if (paused) { paused = false; pausedTotal += Date.now() - pausedAt; }
+      log(`⏹ stop requested${jobInFlight ? ' — waiting for the current job to be recorded' : ''}`);
+      emit('stopped', { text: jobInFlight ? 'stopping after the current job is recorded' : 'stopping' });
+      if (!jobInFlight) closeForStop();
+    },
+  };
+  if (typeof process.send === 'function') {
+    process.on('message', (m) => { if (m && m.type === 'control' && control[m.action]) control[m.action](); });
+    process.on('disconnect', () => control.stop()); // the app went away: stop cleanly
+  }
+  /** The single end-of-job path: history + event, then honour a pending stop. */
+  const finishJob = (id, outcome, state) => {
+    tracker?.finish(id, outcome, state);
+    jobInFlight = false;
+    if (stopRequested) closeForStop();
+  };
+  /** window.__aaMayStartJob(): awaited by the page before each new job (and before paging). */
+  async function onMayStartJob() {
+    while (paused && !stopRequested) await new Promise((r) => setTimeout(r, 400));
+    return !stopRequested;
+  }
+
   let submitted = 0;
   let lastActivity = Date.now();
   let searchIdx = 0;
@@ -527,10 +577,10 @@ function buildInjection(max = TARGET) {
         if (r.status === 'APPLIED' && r.reason !== 'already-applied') {
           submitted++;
           log(`==> ${submitted}/${TARGET} this run (dry run — not recorded)`);
-          tracker.finish(rid, { status: 'DRY', reason: 'would apply — not submitted' }, 'would-apply');
+          finishJob(rid, { status: 'DRY', reason: 'would apply — not submitted' }, 'would-apply');
         } else {
           log(`  (dry run — would record ${r.status}: ${r.reason})`);
-          tracker.finish(rid, { status: 'DRY', reason: `would record ${r.status}: ${r.reason}` }, null);
+          finishJob(rid, { status: 'DRY', reason: `would record ${r.status}: ${r.reason}` }, null);
         }
         emit('waiting', { counts: counts(), text: 'dry run — next job' });
         return { remaining: TARGET - submitted };
@@ -539,7 +589,7 @@ function buildInjection(max = TARGET) {
         // TEST writes the ledger only for its allow-listed jobs; anything else was never clicked
         run.excluded.add(rid);
         log(`  (TEST — ${rid} is not allow-listed; ${r.status}: ${r.reason} not recorded)`);
-        tracker.finish(rid, { status: 'NOT-RECORDED', reason: `TEST: not allow-listed (${r.status}: ${r.reason})` }, null);
+        finishJob(rid, { status: 'NOT-RECORDED', reason: `TEST: not allow-listed (${r.status}: ${r.reason})` }, null);
         return { remaining: testDone ? 0 : TARGET - submitted };
       }
       if (r.status === 'APPLIED') {
@@ -554,15 +604,15 @@ function buildInjection(max = TARGET) {
             log(`==> ${submitted}/${TARGET} this run (${run.today}/${DAILY_CAP} today)`);
             try { logApplication({ title: r.title, company: r.company, salary: '', skills: matchSkills(r.title || ''), link: rec.url, verified: 'verified', jd: '' }); }
             catch (e) { log('CSV write failed: ' + e.message); }
-            tracker.finish(rid, { status: 'APPLIED', reason: rec.reason, verification: v, counted: true }, 'application-verified');
+            finishJob(rid, { status: 'APPLIED', reason: rec.reason, verification: v, counted: true }, 'application-verified');
           } else {
             log('  ↩ already applied before this run — recorded, not counted');
-            tracker.finish(rid, { status: 'APPLIED', reason: 'already-applied', verification: v, counted: false }, 'already-applied');
+            finishJob(rid, { status: 'APPLIED', reason: 'already-applied', verification: v, counted: false }, 'already-applied');
           }
         } else {
           const rec = run.record({ ...r, status: 'FAILED', reason: `unverified (${v}) after: ${r.reason || ''}` });
           log(`  ❌ not verified (${v}) — recorded FAILED, not counted`);
-          tracker.finish(rid, { status: 'FAILED', reason: rec.reason, verification: v }, 'failed');
+          finishJob(rid, { status: 'FAILED', reason: rec.reason, verification: v }, 'failed');
         }
       } else if (r.status === 'FAILED' || r.status === 'SKIPPED') {
         const rec = run.record(r); // ledger keeps only whitelisted fields; details go to history
@@ -572,10 +622,10 @@ function buildInjection(max = TARGET) {
           // Observation only — it never changes the ledger or any count.
           const afterAbandon = r.clicked ? await verifyNaukriApplied(source.context, r.url) : null;
           if (afterAbandon) log(`  (after abandoning, the job page reads: ${afterAbandon})`);
-          tracker.finish(rid, { status: 'SKIPPED', reason: rec.reason, intervention: r.intervention || null,
+          finishJob(rid, { status: 'SKIPPED', reason: rec.reason, intervention: r.intervention || null,
             clicked: !!r.clicked, pageStateAfterAbandon: afterAbandon }, 'skipped');
         } else {
-          tracker.finish(rid, { status: 'FAILED', reason: rec.reason }, 'failed');
+          finishJob(rid, { status: 'FAILED', reason: rec.reason }, 'failed');
         }
       }
       markTested(rid);
@@ -609,7 +659,7 @@ function buildInjection(max = TARGET) {
     log(`  🔒 click gate: ${id} → ${ok ? 'ALLOW' : 'DENY'} (${MODE})`);
     if (!ok && run) {
       run.excluded.add(String(id)); // not again this run
-      tracker?.finish(String(id), { status: 'NOT-SUBMITTED', reason: `click gate denied (${MODE})` }, null);
+      finishJob(String(id), { status: 'NOT-SUBMITTED', reason: `click gate denied (${MODE})` }, null);
     }
     return ok;
   }
@@ -618,7 +668,10 @@ function buildInjection(max = TARGET) {
   function onEvent(source, e) {
     if (!e || !PAGE_STATES.includes(e.state)) return false;
     const jid = String(e.jobId || '');
-    if (e.state === 'checking-job') tracker.touch(jid, { searchIdx, search: site.searches[searchIdx], page: resumeUrl });
+    if (e.state === 'checking-job') {
+      jobInFlight = true;
+      tracker.touch(jid, { searchIdx, search: site.searches[searchIdx], page: resumeUrl });
+    }
     if (e.details || e.job) tracker.touch(jid, { ...(e.job || {}), ...(e.details || {}) });
     const { state, ...data } = e;
     tracker.event(jid, state, data);
@@ -687,7 +740,7 @@ function buildInjection(max = TARGET) {
       if (ext && run) {
         const eid = require('./naukri-ledger').jobId(ext[2]);
         run.excluded.add(eid);
-        tracker.finish(eid, { status: 'DEFERRED', reason: 'company-site application (paused)' + (LIVE ? '' : ' — dry run, not written to the deferred list') }, 'deferred');
+        finishJob(eid, { status: 'DEFERRED', reason: 'company-site application (paused)' + (LIVE ? '' : ' — dry run, not written to the deferred list') }, 'deferred');
         if (LIVE && !deferredIds.has(eid)) { // dry runs write nothing
           try {
             if (deferred.defer({ url: ext[2], title: ext[1].trim() }, deferred.DEFERRED, deferredIds)) log(`  ↪ deferred company-site job ${eid} (naukri-deferred.jsonl)`);
@@ -768,7 +821,10 @@ function buildInjection(max = TARGET) {
     await ctx.exposeBinding('__aaMayClick', onMayClick);
     await ctx.exposeBinding('__aaAnswer', onAnswer);
     await ctx.exposeBinding('__aaEvent', onEvent);
+    await ctx.exposeBinding('__aaMayStartJob', onMayStartJob);
   }
+  currentCtx = ctx;
+  if (stopRequested) { await ctx.close().catch(() => {}); return; }
 
   // Seed the seen-list from the site's own applied list. The in-page list lives in
   // localStorage that wellfound's role/job pages do not share across navigations, and
@@ -808,8 +864,8 @@ function buildInjection(max = TARGET) {
 
   // Supervisor: re-inject the search tab when idle, close finished form tabs,
   // rotate searches on inactivity, stop on target/time.
-  while (submitted < TARGET && Date.now() < deadline && !testDone) {
-    await new Promise((r) => setTimeout(r, 45000));
+  while (submitted < TARGET && !pastDeadline() && !testDone && !stopRequested) {
+    await nap(45000);
 
     const pages = ctx.pages();
     let anyBusy = false;
@@ -831,7 +887,7 @@ function buildInjection(max = TARGET) {
 
     // Work the external queue whenever the in-page script is idle, so the two
     // never drive the browser at the same time.
-    while (EXTERNAL_ON && !anyBusy && externalQueue.length && submitted < TARGET && Date.now() < deadline) {
+    while (EXTERNAL_ON && !anyBusy && externalQueue.length && submitted < TARGET && !pastDeadline()) {
       const job = externalQueue.shift();
       log(`🔗 external: ${job.title}`);
       const res = await applyExternal(ctx, job, { CV, live: LIVE, resumePath: RESUME_PATH, log });
@@ -891,7 +947,7 @@ function buildInjection(max = TARGET) {
   // Close-and-reopen loop: a session that ends early (feed exhausted, tab wedged,
   // browser crash) costs a fresh browser, not the run. `submitted` and `deadline`
   // live outside, so restarts resume toward the same 30 rather than starting over.
-  for (let attempt = 1; submitted < TARGET && Date.now() < deadline && !testDone; attempt++) {
+  for (let attempt = 1; submitted < TARGET && !pastDeadline() && !testDone && !stopRequested; attempt++) {
     if (attempt > 1) log(`↻ Reopening browser (attempt ${attempt}/${MAX_RESTARTS}) — ${submitted}/${TARGET} done so far`);
     try {
       await session();
@@ -907,15 +963,17 @@ function buildInjection(max = TARGET) {
         continue;
       }
     }
-    if (submitted >= TARGET || Date.now() >= deadline || searchesExhausted || testDone) break;
+    if (submitted >= TARGET || pastDeadline() || searchesExhausted || testDone || stopRequested) break;
     if (attempt >= MAX_RESTARTS) { log(`Stopping after ${MAX_RESTARTS} browser restarts — no more jobs to apply to.`); break; }
-    await new Promise((r) => setTimeout(r, 15000)); // let the profile lock clear before relaunching
+    await nap(15000); // let the profile lock clear before relaunching
   }
 
   log(`Finished: ${submitted}/${TARGET} applications ${LIVE ? 'submitted' : 'simulated (dry run)'}.`);
-  const endReason = testDone ? 'all TEST jobs reached an outcome' : submitted >= TARGET ? 'run target reached'
-    : searchesExhausted ? 'all searches exhausted' : Date.now() >= deadline ? 'time limit reached' : 'browser restarts exhausted';
-  emit('completed', { counts: counts(), text: endReason, errors: surfacedErrors });
+  const endReason = stopRequested ? 'stopped by the user' : testDone ? 'all TEST jobs reached an outcome' : submitted >= TARGET ? 'run target reached'
+    : searchesExhausted ? 'all searches exhausted' : pastDeadline() ? 'time limit reached' : 'browser restarts exhausted';
+  emit(stopRequested ? 'stopped' : 'completed', { counts: counts(), text: endReason, errors: surfacedErrors, final: true });
+  // forked by the app: the open IPC channel would keep this process alive
+  if (process.connected) { process.removeAllListeners('disconnect'); process.disconnect(); }
   if (surfacedErrors) log(`⚠ ${surfacedErrors} unexpected error(s) were logged during this run — see ERROR lines above.`);
   if (site.externalApply) {
     log(`External (company site): ${extStats.applied} applied, ${extStats.skipped} skipped (account required / not a form), ` +

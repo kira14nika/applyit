@@ -432,8 +432,16 @@
     } catch (e) { log('  report to runner failed:', e.message); return null; }
   };
 
+  // Pause/Stop from the app: the runner holds this call while paused and answers false
+  // on stop. No runner (pasted by hand) = always go.
+  const mayStartJob = async () => {
+    if (typeof window.__aaMayStartJob !== 'function') return true;
+    try { return (await window.__aaMayStartJob()) === true; } catch (e) { return false; }
+  };
+
   let extQueued = 0;
   while (remaining > 0) {
+    if (!(await mayStartJob())) { log('⏹ stopped by the runner — no new job started.'); break; }
     const cards = [...document.querySelectorAll(SELECTORS.jobCards)].filter(visible);
     let job = null;
 
