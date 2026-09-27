@@ -68,7 +68,6 @@
 
   // ======================= HELPERS =======================
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const humanDelay = () => sleep(CONFIG.MIN_DELAY_MS + Math.random() * (CONFIG.MAX_DELAY_MS - CONFIG.MIN_DELAY_MS));
   // Instantly materialising a full sentence is the most obviously non-human thing
   // the script does. Insert it in 1-3 char bursts with jittered gaps instead.
   const typeLikeHuman = async (doc, text) => {
@@ -80,6 +79,11 @@
     }
   };
   const log = (...a) => console.log('%c[auto-apply]', 'color:#4a90d9;font-weight:bold', ...a);
+  // Structured progress for the runner (__aaEvent). Fire-and-forget: never awaited, never throws.
+  const emit = (state, data = {}) => {
+    try { if (typeof window.__aaEvent === 'function') window.__aaEvent({ state, ...data }).catch(() => {}); } catch (e) { /* no runner */ }
+  };
+  const textOf = (root, sel) => (root?.querySelector(sel)?.innerText || '').replace(/\s+/g, ' ').trim();
 
   function visible(el) {
     return el && el.offsetParent !== null && !el.disabled;
@@ -234,6 +238,7 @@
         log(`  ✍ A: "${String(answer).slice(0, 60)}" (${res.source}: ${String(res.evidence).slice(0, 60)})`);
       }
       lastAnswered = question;
+      emit('filling-answer', { jobId: job.id, question, answer: res.answer, text: 'answer filled' });
 
       await sleep(800);
       const send = findButtonByText(drawer, SELECTORS.chatSendText) ||
@@ -269,6 +274,17 @@
       return btn;
     }, 30000);
 
+    {
+      const d = popup.document;
+      emit('opening-application', { jobId: job.id, text: 'job page open', details: {
+        // class names measured on a live job page 2026-09-28 (styles_jhc__exp__…, …)
+        location: textOf(d, '[class*="jhc__location__"]'),
+        salary: textOf(d, '[class*="jhc__salary__"]'),
+        experience: textOf(d, '[class*="jhc__exp__"]'),
+        stats: textOf(d, '[class*="jhc__jd-stats__"]'),
+        description: jobContext(d, job).description,
+      } });
+    }
     if (!applyBtn) { log('  ⚠ no Apply button found — skipping.'); why = 'no Apply button within 30s'; return false; }
     // In-page JS can't follow the handoff to the employer's domain (cross-origin),
     // so hand the job to the Node runner, which applies on the company site itself.
@@ -285,6 +301,7 @@
     let allowed = false;
     try { allowed = typeof window.__aaMayClick === 'function' && (await window.__aaMayClick(job.id)) === true; } catch (e) { allowed = false; }
     if (!allowed) { log(`  🔒 click not allowed by the runner for ${job.id} — not submitting.`); return 'denied'; }
+    emit('submitting', { jobId: job.id, text: 'clicking Apply' });
 
     applyBtn.scrollIntoView({ block: 'center', inline: 'center' });
     applyBtn.focus();
@@ -434,6 +451,13 @@
       job = { href: link.href, id: idOf(link.href), title, company, card };
       break;
     }
+    if (job) emit('checking-job', { jobId: job.id, text: 'checking job',
+      job: { id: job.id, title: job.title, company: job.company, url: job.href },
+      details: job.card ? {
+        location: textOf(job.card, '.locWdth'),
+        experience: textOf(job.card, '.expwdth'),
+        tags: [...job.card.querySelectorAll('li.tag-li')].map((li) => li.innerText.trim()).filter(Boolean),
+      } : {} });
 
     if (!job) {
       const sample = cards.slice(0, 3).map((c) =>
@@ -490,7 +514,9 @@
         break;
       }
     }
-    await humanDelay();
+    const pause = CONFIG.MIN_DELAY_MS + Math.random() * (CONFIG.MAX_DELAY_MS - CONFIG.MIN_DELAY_MS);
+    emit('waiting', { text: `pausing ${Math.round(pause / 1000)}s before the next job`, ms: Math.round(pause) });
+    await sleep(pause);
   }
 
   popup.close();

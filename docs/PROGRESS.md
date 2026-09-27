@@ -56,4 +56,26 @@ Not verified: `GEMINI_KEY` is empty in this `.env`, so no real model call was ma
 run `node answer-engine.js --check` after adding a key. The in-page chatbot path is not
 exercised by any test (it only appears after a real Apply click); see CONTROLLED-TEST.md.
 
-## Next — Phase 3: structured events + history
+## Phase 3 — Structured events + history ✅
+
+| What | Where |
+|---|---|
+| Event bus (EventEmitter) with PLAN §14 states + `deferred`, `would-apply` (DRY), `resumed`, `error`; each event `{runId, seq, ts, state, …}`; mirrored to `process.send({type:'event', event, snapshot})` when forked | `run-events.js` `createBus` |
+| Live snapshot for the UI: state, phase text, current job, search, page URL, question/answer, counts (copied from the ledger run — never computed here), per-run tallies (applied / already-applied / skipped / failed / deferred / would-apply), last result | `bus.snapshot` |
+| Page → Node progress via `__aaEvent` (fire-and-forget): checking-job, opening-application, submitting, filling-answer, waiting. Node alone emits outcomes (application-verified etc.) | page `emit()`, runner `onEvent`, `PAGE_STATES` |
+| Node states: starting, searching, loading-results, generating-answer, verifying, application-verified, already-applied, skipped, failed, deferred, would-apply, waiting, completed, error | runner |
+| `naukri-history.jsonl`: ONE `type:'job'` record per job outcome, keyed by `runId`+`jobId`: title, company, location, salary, experience, stats, tags, description, search query, results page, timeline (ts + state), questions with the engine's result (answer / evidence / missing), outcome (status, reason, verification, intervention, clicked, page state after an abandoned questionnaire). Every mode writes it, tagged `mode` | `run-events.js` `createTracker`, `naukri-history.js` |
+| Job-detail selectors measured on a live job page / search card (read-only) | page `opening-application` / `checking-job` |
+
+The ledger stays the only count source; history/events are observation only.
+
+Tests: `run-events.test.js` (seq/runId/ts, unknown state throws, IPC mirror, tallies
+keep already-applied separate, page states can't declare outcomes, one record per job
+with timeline/questions/outcome, failing writer can't break a run, history file).
+
+Verified by a forked DRY run: IPC delivered starting → searching → loading-results →
+checking-job → opening-application → would-apply → waiting → deferred, and history
+records carried real job details. Not verified: submitting / generating-answer /
+filling-answer / verifying / application-verified / skipped events (need a click).
+
+## Next — Phase 4: desktop app (Electron)

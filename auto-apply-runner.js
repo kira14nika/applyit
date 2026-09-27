@@ -41,10 +41,12 @@ process.on('unhandledRejection', (e) => {
   if (isBenignRace(e)) return console.log(`${stamp()} (ignored navigation race) ${firstLine(e).slice(0, 120)}`);
   surfacedErrors++;
   console.error(`${stamp()} ERROR unhandledRejection: ${(e && e.stack) || e}`);
+  try { emit('error', { text: `ERROR: ${firstLine(e)}` }); } catch (x) { /* not initialised yet */ }
 });
 process.on('uncaughtException', (e) => {
   if (isBenignRace(e)) return console.log(`${stamp()} (ignored navigation race) ${firstLine(e).slice(0, 120)}`);
   console.error(`${stamp()} FATAL uncaughtException: ${(e && e.stack) || e}`);
+  try { emit('error', { text: `FATAL: ${firstLine(e)}` }); } catch (x) { /* not initialised yet */ }
   process.exit(1); // state is unknown after an uncaught exception; Playwright closes Chrome on exit
 });
 
@@ -202,6 +204,11 @@ const historyAppend = (rec) => {
   if (!run) return;
   try { history.append({ runId: RUN_ID, mode: MODE, ...rec }); } catch (e) { log('history write failed: ' + e.message); }
 };
+// Structured states (run-events.js): an EventEmitter, mirrored to process.send when forked.
+const { createBus, createTracker, PAGE_STATES } = require('./run-events');
+const bus = run ? createBus({ runId: RUN_ID, mode: MODE }) : null;
+const tracker = bus ? createTracker({ bus, write: historyAppend }) : null;
+const emit = (state, data = {}) => { if (bus) bus.emitState(state, data); };
 
 // ======== CSV log of every submitted application (created once, appended forever) ========
 const CSV_FILE = path.join(__dirname, 'applications.csv');
@@ -352,6 +359,8 @@ function buildInjection(max = TARGET) {
     (EXTERNAL_ON ? '' : ' — company-site applies paused until they are ledger-recorded'));
   if (run && deferredIds.size) log(`Deferred company-site jobs excluded: ${deferredIds.size}`);
   log(`Starting. mode=${MODE === 'DRY' ? 'DRY RUN' : MODE} target=${TARGET} applications, max ${MAX_RUNTIME_MS / 60000} min`);
+  emit('starting', { counts: { run: 0, target: TARGET, today: run ? run.today : dayState.count, dailyCap: DAILY_CAP },
+    text: `${MODE} run, target ${TARGET}` });
   const deadline = Date.now() + MAX_RUNTIME_MS;
   let submitted = 0;
   let lastActivity = Date.now();
@@ -472,6 +481,7 @@ function buildInjection(max = TARGET) {
    */
   async function verifyNaukriApplied(context, url) {
     const id = require('./naukri-ledger').jobId(url);
+    tracker?.event(id, 'verifying', { text: 'reloading the job page to read its Applied state' });
     let page;
     try {
       page = await context.newPage();
@@ -505,22 +515,31 @@ function buildInjection(max = TARGET) {
    * Returns {remaining} for THIS run; the browser loops on it. Counts move only after
    * reload verification and a successful ledger append.
    */
+  const counts = () => ({ run: submitted, target: TARGET, today: run ? run.today : dayState.count, dailyCap: DAILY_CAP });
+
   async function onReport(source, r) {
+    r = r || {};
+    const rid = require('./naukri-ledger').jobId(r.url);
+    tracker?.touch(rid, { url: r.url, title: r.title, company: r.company });
     try {
-      r = r || {};
       if (!LIVE) { // dry run: nothing is written, simulated applies still pace the run
-        run.excluded.add(require('./naukri-ledger').jobId(r.url)); // in memory: don't re-walk it this run
+        run.excluded.add(rid); // in memory: don't re-walk it this run
         if (r.status === 'APPLIED' && r.reason !== 'already-applied') {
           submitted++;
           log(`==> ${submitted}/${TARGET} this run (dry run — not recorded)`);
-        } else log(`  (dry run — would record ${r.status}: ${r.reason})`);
+          tracker.finish(rid, { status: 'DRY', reason: 'would apply — not submitted' }, 'would-apply');
+        } else {
+          log(`  (dry run — would record ${r.status}: ${r.reason})`);
+          tracker.finish(rid, { status: 'DRY', reason: `would record ${r.status}: ${r.reason}` }, null);
+        }
+        emit('waiting', { counts: counts(), text: 'dry run — next job' });
         return { remaining: TARGET - submitted };
       }
-      const rid = require('./naukri-ledger').jobId(r.url);
       if (MODE === 'TEST' && !POLICY.allow.has(rid)) {
         // TEST writes the ledger only for its allow-listed jobs; anything else was never clicked
         run.excluded.add(rid);
         log(`  (TEST — ${rid} is not allow-listed; ${r.status}: ${r.reason} not recorded)`);
+        tracker.finish(rid, { status: 'NOT-RECORDED', reason: `TEST: not allow-listed (${r.status}: ${r.reason})` }, null);
         return { remaining: testDone ? 0 : TARGET - submitted };
       }
       if (r.status === 'APPLIED') {
@@ -535,28 +554,36 @@ function buildInjection(max = TARGET) {
             log(`==> ${submitted}/${TARGET} this run (${run.today}/${DAILY_CAP} today)`);
             try { logApplication({ title: r.title, company: r.company, salary: '', skills: matchSkills(r.title || ''), link: rec.url, verified: 'verified', jd: '' }); }
             catch (e) { log('CSV write failed: ' + e.message); }
-          } else log('  ↩ already applied before this run — recorded, not counted');
+            tracker.finish(rid, { status: 'APPLIED', reason: rec.reason, verification: v, counted: true }, 'application-verified');
+          } else {
+            log('  ↩ already applied before this run — recorded, not counted');
+            tracker.finish(rid, { status: 'APPLIED', reason: 'already-applied', verification: v, counted: false }, 'already-applied');
+          }
         } else {
-          run.record({ ...r, status: 'FAILED', reason: `unverified (${v}) after: ${r.reason || ''}` });
+          const rec = run.record({ ...r, status: 'FAILED', reason: `unverified (${v}) after: ${r.reason || ''}` });
           log(`  ❌ not verified (${v}) — recorded FAILED, not counted`);
+          tracker.finish(rid, { status: 'FAILED', reason: rec.reason, verification: v }, 'failed');
         }
       } else if (r.status === 'FAILED' || r.status === 'SKIPPED') {
-        run.record(r); // ledger keeps only whitelisted fields; details go to history below
+        const rec = run.record(r); // ledger keeps only whitelisted fields; details go to history
         if (r.status === 'SKIPPED') {
           log(`  ⏭ SKIPPED — ${r.reason}${r.intervention?.question ? ` | Q: "${String(r.intervention.question).slice(0, 80)}"` : ''}`);
           // Apply was clicked and the questionnaire abandoned: what does Naukri show now?
           // Observation only — it never changes the ledger or any count.
           const afterAbandon = r.clicked ? await verifyNaukriApplied(source.context, r.url) : null;
           if (afterAbandon) log(`  (after abandoning, the job page reads: ${afterAbandon})`);
-          historyAppend({ type: 'intervention', jobId: rid, url: r.url, title: r.title, company: r.company,
-            status: 'SKIPPED', reason: r.reason, intervention: r.intervention || null, clicked: !!r.clicked,
-            pageStateAfterAbandon: afterAbandon });
+          tracker.finish(rid, { status: 'SKIPPED', reason: rec.reason, intervention: r.intervention || null,
+            clicked: !!r.clicked, pageStateAfterAbandon: afterAbandon }, 'skipped');
+        } else {
+          tracker.finish(rid, { status: 'FAILED', reason: rec.reason }, 'failed');
         }
       }
       markTested(rid);
     } catch (e) {
       log('ledger/report error (nothing counted): ' + String(e.message || e).split('\n')[0]);
+      emit('error', { jobId: rid, text: `ledger/report error: ${firstLine(e)}` });
     }
+    emit('waiting', { counts: counts(), text: 'recorded — continuing' });
     return { remaining: testDone ? 0 : TARGET - submitted };
   }
 
@@ -566,12 +593,13 @@ function buildInjection(max = TARGET) {
    */
   const FACTS = answerEngine.buildFacts(CV);
   async function onAnswer(source, q) {
+    const jid = String(q?.job?.id || '');
+    tracker?.event(jid, 'generating-answer', { question: q?.question || '', options: q?.options || [] });
     const res = await answerEngine.answer(q, { facts: FACTS, apiKey: geminiKey, model: geminiModel || answerEngine.DEFAULT_MODEL });
     log(res.status === 'answered'
       ? `  💬 answered (${res.source}) from ${String(res.evidence).slice(0, 60)}`
       : `  ❔ unknown (${res.category}): ${String(res.missing).slice(0, 100)}`);
-    historyAppend({ type: 'answer', jobId: q?.job?.id || '', question: q?.question || '', options: q?.options || [],
-      numeric: !!q?.numeric, result: res });
+    tracker?.question(jid, { question: q?.question || '', options: q?.options || [], numeric: !!q?.numeric, result: res });
     return res;
   }
 
@@ -579,8 +607,22 @@ function buildInjection(max = TARGET) {
   function onMayClick(source, id) {
     const ok = mayClick(POLICY, String(id || ''));
     log(`  🔒 click gate: ${id} → ${ok ? 'ALLOW' : 'DENY'} (${MODE})`);
-    if (!ok && run) run.excluded.add(String(id)); // not again this run
+    if (!ok && run) {
+      run.excluded.add(String(id)); // not again this run
+      tracker?.finish(String(id), { status: 'NOT-SUBMITTED', reason: `click gate denied (${MODE})` }, null);
+    }
     return ok;
+  }
+
+  /** window.__aaEvent({state, jobId, job, details, text, …}) — progress the page can see. */
+  function onEvent(source, e) {
+    if (!e || !PAGE_STATES.includes(e.state)) return false;
+    const jid = String(e.jobId || '');
+    if (e.state === 'checking-job') tracker.touch(jid, { searchIdx, search: site.searches[searchIdx], page: resumeUrl });
+    if (e.details || e.job) tracker.touch(jid, { ...(e.job || {}), ...(e.details || {}) });
+    const { state, ...data } = e;
+    tracker.event(jid, state, data);
+    return true;
   }
 
   function wire(page) {
@@ -645,6 +687,7 @@ function buildInjection(max = TARGET) {
       if (ext && run) {
         const eid = require('./naukri-ledger').jobId(ext[2]);
         run.excluded.add(eid);
+        tracker.finish(eid, { status: 'DEFERRED', reason: 'company-site application (paused)' + (LIVE ? '' : ' — dry run, not written to the deferred list') }, 'deferred');
         if (LIVE && !deferredIds.has(eid)) { // dry runs write nothing
           try {
             if (deferred.defer({ url: ext[2], title: ext[1].trim() }, deferred.DEFERRED, deferredIds)) log(`  ↪ deferred company-site job ${eid} (naukri-deferred.jsonl)`);
@@ -686,6 +729,7 @@ function buildInjection(max = TARGET) {
       if (!site.injectOn(url) || url === resumeUrl) return;
       resumeUrl = url;
       log(`📄 page: ${url}`);
+      emit('loading-results', { search: site.searches[searchIdx], page: url, text: `results page ${url}` });
       if (pageAdvanced) {
         page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {})
           .then(() => page.waitForTimeout(1500))
@@ -723,6 +767,7 @@ function buildInjection(max = TARGET) {
     await ctx.exposeBinding('__aaReport', onReport);
     await ctx.exposeBinding('__aaMayClick', onMayClick);
     await ctx.exposeBinding('__aaAnswer', onAnswer);
+    await ctx.exposeBinding('__aaEvent', onEvent);
   }
 
   // Seed the seen-list from the site's own applied list. The in-page list lives in
@@ -750,6 +795,8 @@ function buildInjection(max = TARGET) {
 
   const startUrl = (site.resumePaging && resumeUrl) || site.searches[site.resumePaging ? searchIdx : 0];
   if (site.resumePaging && resumeUrl) log(`Resuming search ${searchIdx + 1}/${site.searches.length} at ${resumeUrl}`);
+  emit('searching', { search: site.searches[searchIdx], page: startUrl, counts: counts(),
+    text: `search ${searchIdx + 1}/${site.searches.length}${resumeUrl ? ' (resumed)' : ''}` });
   await mainPage.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
   // not logged in? every flow needs a session — bail with a clear message
   await mainPage.waitForTimeout(8000);
@@ -815,6 +862,7 @@ function buildInjection(max = TARGET) {
           break;
         }
         log(`Rotating to next search: ${site.searches[searchIdx]}`);
+        emit('searching', { search: site.searches[searchIdx], page: site.searches[searchIdx], text: `search ${searchIdx + 1}/${site.searches.length}` });
         if (site.resumePaging) lastInject = 0; // the new search's first page injects on load
         await mainPage.goto(site.searches[searchIdx], { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
       } else {
@@ -865,6 +913,9 @@ function buildInjection(max = TARGET) {
   }
 
   log(`Finished: ${submitted}/${TARGET} applications ${LIVE ? 'submitted' : 'simulated (dry run)'}.`);
+  const endReason = testDone ? 'all TEST jobs reached an outcome' : submitted >= TARGET ? 'run target reached'
+    : searchesExhausted ? 'all searches exhausted' : Date.now() >= deadline ? 'time limit reached' : 'browser restarts exhausted';
+  emit('completed', { counts: counts(), text: endReason, errors: surfacedErrors });
   if (surfacedErrors) log(`⚠ ${surfacedErrors} unexpected error(s) were logged during this run — see ERROR lines above.`);
   if (site.externalApply) {
     log(`External (company site): ${extStats.applied} applied, ${extStats.skipped} skipped (account required / not a form), ` +
