@@ -168,10 +168,23 @@
   if (typeof state.applied !== 'number') state.applied = 0;
   const saveState = () => localStorage.setItem(STORE_KEY, JSON.stringify(state));
 
+  // Setup preferences (from the runner) replace the built-in title words and ADD to the
+  // built-in blocklist; without Setup the lists above are used unchanged.
+  const TF = __CFG.titleFilter || null;
+  const KEYWORDS = TF && TF.keywords.length ? TF.keywords : CONFIG.TITLE_KEYWORDS;
+  const BLOCKLIST = [...CONFIG.TITLE_BLOCKLIST, ...(TF ? TF.blocklist : [])];
   const titleOk = (t) => {
     const lower = t.toLowerCase();
-    return CONFIG.TITLE_KEYWORDS.some((k) => lower.includes(k)) &&
-           !CONFIG.TITLE_BLOCKLIST.some((k) => lower.includes(k));
+    return KEYWORDS.some((k) => lower.includes(k)) &&
+           !BLOCKLIST.some((k) => lower.includes(k));
+  };
+  // Preferred locations (Setup). Unknown card location = keep (can't tell); "remote"
+  // cards pass when the user accepts remote work.
+  const LF = __CFG.locationFilter || null;
+  const locationOk = (loc) => {
+    if (!LF || !LF.locations.length || !loc) return true;
+    const l = loc.toLowerCase();
+    return LF.locations.some((x) => l.includes(x.toLowerCase())) || (LF.remote && /remote|work from home/.test(l));
   };
 
   // ======================= CHATBOT QUESTIONNAIRE (inside popup) =======================
@@ -455,6 +468,7 @@
       const title = link.textContent.replace(/\s+/g, ' ').trim();
       if (EXCLUDED.has(idOf(link.href))) { nSeen++; continue; }
       if (!titleOk(title)) { nFiltered++; continue; }
+      if (!locationOk(textOf(card, '.locWdth'))) { nFiltered++; continue; }
       const company = (card.querySelector('.comp-name, [class*="comp-name" i]')?.textContent || '').trim();
       job = { href: link.href, id: idOf(link.href), title, company, card };
       break;

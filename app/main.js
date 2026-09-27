@@ -93,6 +93,52 @@ ipcMain.handle('data:applications', () => data.buildApplications(files()));
 ipcMain.handle('data:job', (_e, id) => data.jobDetails(files(), String(id)));
 ipcMain.handle('data:reports', () => data.buildReports(files()));
 
+// ---------------------------------------------------------------- Setup (profile + preferences)
+const resumeProfile = require('../resume-profile');
+const preferences = require('../preferences');
+const cfg = () => { delete require.cache[require.resolve('../config')]; return require('../config'); }; // .env may change
+const str = (v) => (typeof v === 'string' ? v.trim() : '');
+const strs = (v) => (Array.isArray(v) ? v.map(str).filter(Boolean) : []);
+/** Only known fields, only strings — the renderer's input is never trusted as-is. */
+function sanitizeProfile(p = {}) {
+  const u = p.userProvided || {};
+  return {
+    name: str(p.name), email: str(p.email), phone: str(p.phone), location: str(p.location), headline: str(p.headline),
+    skills: strs(p.skills), tools: strs(p.tools), languages: strs(p.languages), certifications: strs(p.certifications),
+    jobs: (Array.isArray(p.jobs) ? p.jobs : []).map((j) => ({ title: str(j.title), employer: str(j.employer), start: str(j.start), end: str(j.end) })).filter((j) => j.title || j.employer),
+    education: (Array.isArray(p.education) ? p.education : []).map((e) => ({ degree: str(e.degree), institution: str(e.institution), year: str(e.year) })).filter((e) => e.degree || e.institution),
+    projects: (Array.isArray(p.projects) ? p.projects : []).map((x) => ({ name: str(x.name), description: str(x.description) })).filter((x) => x.name),
+    userProvided: { noticePeriod: str(u.noticePeriod), currentCTC: str(u.currentCTC), expectedCTC: str(u.expectedCTC),
+      totalExperienceYears: str(u.totalExperienceYears), workAuthorization: str(u.workAuthorization) },
+    resumeFile: str(p.resumeFile), resumeText: typeof p.resumeText === 'string' ? p.resumeText.slice(0, 60000) : '',
+  };
+}
+ipcMain.handle('setup:load', () => ({
+  profile: resumeProfile.load(), prefs: preferences.load(), hasKey: !!cfg().geminiKey,
+  model: cfg().geminiModel || require('../answer-engine').DEFAULT_MODEL, max: preferences.MAX,
+}));
+ipcMain.handle('setup:pickResume', async () => {
+  const { dialog } = require('electron');
+  const r = await dialog.showOpenDialog(win, { title: 'Select your resume (PDF)', properties: ['openFile'], filters: [{ name: 'PDF', extensions: ['pdf'] }] });
+  return r.canceled ? null : r.filePaths[0];
+});
+ipcMain.handle('setup:extract', async (_e, file) => {
+  try {
+    if (!/\.pdf$/i.test(String(file)) || !fs.existsSync(file)) return { ok: false, error: 'choose a PDF file' };
+    const text = await resumeProfile.extractPdfText(file);
+    if (!text) return { ok: false, error: 'no text found in this PDF (is it a scanned image?)' };
+    const { geminiKey, geminiModel } = cfg();
+    const r = await resumeProfile.buildProfile(text, { apiKey: geminiKey, model: geminiModel });
+    return { ok: true, ...r, profile: { ...r.profile, resumeFile: file, resumeText: text } };
+  } catch (e) { return { ok: false, error: String(e.message || e) }; }
+});
+ipcMain.handle('setup:saveProfile', (_e, p) => ({ ok: true, profile: resumeProfile.save(sanitizeProfile(p)) }));
+ipcMain.handle('setup:savePrefs', (_e, p) => {
+  const saved = preferences.save(p);
+  return { ok: true, prefs: saved, searches: preferences.buildSearches(saved) };
+});
+ipcMain.handle('setup:previewSearches', (_e, p) => preferences.buildSearches(preferences.normalize(p)));
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1240, height: 840, minWidth: 900, minHeight: 600, title: 'ApplyIt',
@@ -146,9 +192,15 @@ async function selftestOnExit(code) {
     job: document.getElementById('cur-job').textContent,
     tallies: document.getElementById('tallies').textContent.replace(/\\s+/g, ' ').trim(),
   })`).catch((e) => ({ error: e.message }));
+  // Setup path inside Electron: pdfjs extraction of the configured resume (read-only, length only)
+  let resumeChars = null;
+  try { const rf = cfg().resumePath; if (rf && fs.existsSync(rf)) resumeChars = (await resumeProfile.extractPdfText(rf)).length; } catch (e) { resumeChars = `error: ${e.message}`; }
+  ui.setupLoaded = await win.webContents.executeJavaScript("document.querySelector('.nav-btn[data-page=\"setup\"]').click(); new Promise(r => setTimeout(() => r(!!document.getElementById('profile-form')), 1500))").catch(() => false);
+  ui.resumeChars = resumeChars;
   const need = ['starting', 'searching', 'checking-job', 'paused', 'resumed', 'stopped'];
   const missing = need.filter((s) => !st.seen.includes(s));
-  const ok = code === 0 && !missing.length && /PAUSED/i.test(st.pausedUi || '') && /STOPPED/i.test(ui.state || '') && ui.events > 5;
+  const ok = code === 0 && !missing.length && /PAUSED/i.test(st.pausedUi || '') && /STOPPED/i.test(ui.state || '') && ui.events > 5
+    && ui.setupLoaded === true && (resumeChars === null || typeof resumeChars === 'number');
   // --capture=<dir>: save a screenshot of each page (needs --show-window to render)
   const cap = (process.argv.find((a) => a.startsWith('--capture=')) || '').slice(10);
   if (cap) {

@@ -101,30 +101,39 @@ function buildPrompt({ question, options, numeric, job }, facts) {
   ].join('\n');
 }
 
-/** One Gemini call. Never throws; errors come back as unknown/ai-error. */
-async function askGemini(q, facts, { apiKey, model = DEFAULT_MODEL, fetchImpl = globalThis.fetch, timeoutMs = 25000 } = {}) {
-  if (!apiKey) return { status: 'unknown', category: 'unanswerable-question', missing: 'AI answering is not configured (GEMINI_KEY is empty)' };
+/**
+ * One Gemini JSON call (shared by answers, resume extraction and matching).
+ * → {ok: true, json} | {ok: false, error}. Never throws. Key in a header, never the URL.
+ */
+async function askJson(prompt, { apiKey, model = DEFAULT_MODEL, fetchImpl = globalThis.fetch, timeoutMs = 25000 } = {}) {
+  if (!apiKey) return { ok: false, error: 'GEMINI_KEY is empty' };
   let text;
   try {
-    const res = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+    const res = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model || DEFAULT_MODEL)}:generateContent`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey }, // header, never the URL
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
       body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: buildPrompt(q, facts) }] }],
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
         generationConfig: { temperature: 0, responseMimeType: 'application/json' },
       }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) return { status: 'unknown', category: 'ai-error', missing: `Gemini HTTP ${res.status}: ${String(data?.error?.message || '').slice(0, 160)}` };
+    if (!res.ok) return { ok: false, error: `Gemini HTTP ${res.status}: ${String(data?.error?.message || '').slice(0, 160)}` };
     text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
   } catch (e) {
-    return { status: 'unknown', category: 'ai-error', missing: `Gemini call failed: ${String(e.message || e).slice(0, 160)}` };
+    return { ok: false, error: `Gemini call failed: ${String(e.message || e).slice(0, 160)}` };
   }
-  let out;
-  try { out = JSON.parse(text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '')); }
-  catch (e) { return { status: 'unknown', category: 'ai-error', missing: 'Gemini returned non-JSON' }; }
-  return validate(out, q);
+  try { return { ok: true, json: JSON.parse(text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '')) }; }
+  catch (e) { return { ok: false, error: 'Gemini returned non-JSON' }; }
+}
+
+/** One question to Gemini. Never throws; errors come back as unknown/ai-error. */
+async function askGemini(q, facts, opts = {}) {
+  if (!opts.apiKey) return { status: 'unknown', category: 'unanswerable-question', missing: 'AI answering is not configured (GEMINI_KEY is empty)' };
+  const res = await askJson(buildPrompt(q, facts), opts);
+  if (!res.ok) return { status: 'unknown', category: 'ai-error', missing: res.error };
+  return validate(res.json, q);
 }
 
 /** Enforce the contract on whatever the model said. Anything off-contract is unknown. */
@@ -160,7 +169,7 @@ async function answer(q, { facts = {}, apiKey = '', model = DEFAULT_MODEL, fetch
   return askGemini(req, relevantFacts(facts, question), { apiKey, model, fetchImpl });
 }
 
-module.exports = { DEFAULT_MODEL, buildFacts, relevantFacts, factLookup, validate, askGemini, answer, buildPrompt };
+module.exports = { DEFAULT_MODEL, buildFacts, relevantFacts, factLookup, validate, askJson, askGemini, answer, buildPrompt };
 
 // node answer-engine.js --check : one tiny real call to prove the key + model respond
 if (require.main === module && process.argv.includes('--check')) {

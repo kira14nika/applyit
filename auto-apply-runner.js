@@ -161,6 +161,18 @@ if (!site) {
 // turn DRY_RUN off with nothing to stop a click.
 if (MODE === 'TEST' && !site.ledger) { console.log(`Usage error: --test is only supported for naukri`); process.exit(1); }
 
+// Setup (preferences.json / profile.json), Naukri only. Without them the built-in
+// searches and the .env CV are used exactly as before.
+const PREFS = site.ledger ? require('./preferences').load() : null;
+const PROFILE = site.ledger ? require('./resume-profile').load() : null;
+if (PREFS) {
+  const searches = require('./preferences').buildSearches(PREFS);
+  if (searches.length) site.searches = searches;
+  // preferences may LOWER the limits, never raise them (normalize() clamps to 10/50)
+  site.perRun = Math.min(site.perRun, PREFS.limits.perRun);
+  site.dailyCap = Math.min(site.dailyCap, PREFS.limits.daily);
+}
+
 // Hard daily cap per site, tracked across runs in a state file — multiple logons in
 // one day resume the count instead of restarting it, and stop dead at the cap.
 const DAILY_CAP = site.dailyCap || 50;
@@ -257,6 +269,11 @@ function buildInjection(max = TARGET) {
       excluded: [...new Set([...run.browserConfig().excluded, ...deferredIds])],
       // TEST: allow-listed job URLs are opened directly, before any search card
       directJobs: POLICY.directUrls.map((u) => ({ href: u, id: require('./naukri-ledger').jobId(u) })),
+      // Setup preferences: title words and locations filter cards (never URL params)
+      ...(PREFS ? {
+        titleFilter: require('./preferences').titleFilter(PREFS),
+        locationFilter: PREFS.anyLocation ? null : { locations: PREFS.locations, remote: PREFS.workModes.includes('remote') },
+      } : {}),
     } : { CV, geminiKey }) })};
     ${run ? `window.__aaJobId = ${require('./naukri-ledger').jobId.toString()};` : ''}
     try { await ${raw}
@@ -358,6 +375,8 @@ function buildInjection(max = TARGET) {
   if (run) log(`Ledger: ${run.today}/${DAILY_CAP} APPLIED today, ${run.excluded.size} job ids permanently excluded` +
     (EXTERNAL_ON ? '' : ' — company-site applies paused until they are ledger-recorded'));
   if (run && deferredIds.size) log(`Deferred company-site jobs excluded: ${deferredIds.size}`);
+  if (run) log(`Setup: ${PREFS ? `preferences.json (${site.searches.length} searches, limits ${site.perRun}/run ${site.dailyCap}/day)` : 'no preferences.json — built-in searches'}; ` +
+    `answers from ${PROFILE ? 'profile.json' : '.env CV'}`);
   log(`Starting. mode=${MODE === 'DRY' ? 'DRY RUN' : MODE} target=${TARGET} applications, max ${MAX_RUNTIME_MS / 60000} min`);
   emit('starting', { counts: { run: 0, target: TARGET, today: run ? run.today : dayState.count, dailyCap: DAILY_CAP },
     text: `${MODE} run, target ${TARGET}` });
@@ -641,7 +660,9 @@ function buildInjection(max = TARGET) {
    * window.__aaAnswer({question, options, numeric, job}) — the page's only source of
    * answers. Facts come from the user's own data, then Gemini; never a fallback.
    */
-  const FACTS = answerEngine.buildFacts(CV);
+  // profile.json (from Setup) when it exists, otherwise the .env CV — never both mixed
+  const FACTS = PROFILE ? require('./resume-profile').factsFromProfile(PROFILE, {}, PREFS)
+    : require('./resume-profile').factsFromProfile(null, answerEngine.buildFacts(CV), PREFS);
   async function onAnswer(source, q) {
     const jid = String(q?.job?.id || '');
     tracker?.event(jid, 'generating-answer', { question: q?.question || '', options: q?.options || [] });

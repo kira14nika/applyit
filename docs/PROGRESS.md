@@ -100,4 +100,28 @@ Self-test (VERIFIED): the real window + a forked DRY run — starting, searching
 loading-results, checking-job, opening-application, would-apply, paused (UI shows
 PAUSED), resumed, stopped (UI shows STOPPED), runner exit 0, no Chrome left.
 
-## Next — Phase 5: resume profile + setup
+## Phase 5 — Resume profile + setup ✅
+
+| What | Where |
+|---|---|
+| Setup page: choose resume PDF → local text extraction (pdfjs-dist, Node) → Gemini structures it (name, contact, skills, tools, languages, jobs with employers/dates, education, certifications, projects) → shown for review/edit → saved to `profile.json` | `resume-profile.js`, `app/renderer/setup.js`, `app/main.js` `setup:*` |
+| No guessed fields: every extracted value must appear word-for-word in the resume text (phones compared by digits); anything else is dropped and listed on screen as "removed (not in resume)". Without a key or on an AI error only literal email/phone are pre-filled | `groundProfile`, `buildProfile` |
+| "What a resume doesn't say" block (notice period, current/expected CTC, total experience, work authorization) — entered by the user, stored in `profile.json` `userProvided` | Setup |
+| `preferences.json`: titles/keywords, locations (+ any), remote/hybrid/on-site, relocation, salary range, experience range, include/exclude title words, limits (can be lowered, never above 10/run, 50/day) | `preferences.js` |
+| Searches built only from what the engine already uses: `https://www.naukri.com/<slug>-jobs?experience=<min years>`; no titles → built-in searches unchanged | `buildSearches`, runner |
+| Title words replace the built-in keyword list; exclude words add to the built-in blocklist; preferred locations filter cards (unknown location kept, "remote" passes when remote is accepted). Salary/experience/work mode are advisory (Phase 6) | page `titleOk`/`locationOk` |
+| Answer engine facts: `profile.json` (+ explicit preferences) when it exists, otherwise the `.env` CV — never mixed | runner `FACTS`, `factsFromProfile` |
+| Main process never trusts renderer input: profile fields are whitelisted and type-checked before saving | `sanitizeProfile` |
+| Shared Gemini JSON transport `askJson` (answers, resume, matching) | `answer-engine.js` |
+
+Tests: `profile-setup.test.js` (real PDF generated in the test → extracted; grounding drops
+an invented job, skill, certification and a normalised location; no key / AI error →
+only literal email/phone; profile round-trip and facts skip empty values; limits clamp;
+search URLs; title filter). Self-test additionally loads the Setup page and extracts the
+configured resume inside Electron (length only).
+
+Not verified: AI extraction against a real Gemini model (no key in `.env`). The
+dependency audit reports 1 high issue in `brace-expansion`, a pre-existing transitive
+dependency of playwright-extra — not introduced here and left untouched.
+
+## Next — Phase 6: AI matching (advisory)
