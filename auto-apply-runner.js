@@ -27,14 +27,34 @@ try {
   ({ chromium } = require('playwright-core'));
 }
 
+const { parseMode, mayClick, isBenignRace } = require('./safety');
+
 // Page reloads (naukri clicking "Next") race the stealth plugin's CDP session and throw
-// async rejections outside any await — swallow them so a normal navigation can't kill the run.
-process.on('unhandledRejection', (e) => console.log(`[${new Date().toLocaleString()}] unhandledRejection (ignored): ${String(e && e.message || e).split('\n')[0]}`));
-process.on('uncaughtException', (e) => console.log(`[${new Date().toLocaleString()}] uncaughtException (ignored): ${String(e && e.message || e).split('\n')[0]}`));
+// async rejections outside any await. ONLY those known races are ignored; anything
+// else is a real bug and is reported as an error (rejection) or ends the run (exception).
+const stamp = () => `[${new Date().toLocaleString()}]`;
+const firstLine = (e) => String((e && e.message) || e).split('\n')[0];
+let surfacedErrors = 0;
+process.on('unhandledRejection', (e) => {
+  if (isBenignRace(e)) return console.log(`${stamp()} (ignored navigation race) ${firstLine(e).slice(0, 120)}`);
+  surfacedErrors++;
+  console.error(`${stamp()} ERROR unhandledRejection: ${(e && e.stack) || e}`);
+});
+process.on('uncaughtException', (e) => {
+  if (isBenignRace(e)) return console.log(`${stamp()} (ignored navigation race) ${firstLine(e).slice(0, 120)}`);
+  console.error(`${stamp()} FATAL uncaughtException: ${(e && e.stack) || e}`);
+  process.exit(1); // state is unknown after an uncaught exception; Playwright closes Chrome on exit
+});
 
 const SITE_ARG = process.argv[2];
 const LOGIN_MODE = process.argv.includes('login');
-const LIVE = process.argv.includes('--live');
+// DRY (default) | TEST (--test --only=…) | LIVE (--live + confirmation). See safety.js.
+let POLICY;
+try { POLICY = parseMode(process.argv); } catch (e) { console.log(`Usage error: ${e.message}`); process.exit(1); }
+const MODE = POLICY.mode;
+// "real" mode: clicks may happen (each one still asks the Node click gate) and the
+// ledger/CSV are written. TEST is real, but only for its allow-listed job ids.
+const LIVE = MODE !== 'DRY';
 // --scheduled marks a run started by Task Scheduler rather than by hand. Such runs
 // wait a random 0-14 minutes before starting and refuse to run outside daytime hours,
 // because a burst of applications at exactly HH:00:00, around the clock, is the most
@@ -130,9 +150,12 @@ const SITES = {
 
 const site = SITES[SITE_ARG];
 if (!site) {
-  console.log('Usage: node auto-apply-runner.js <indeed|wellfound|naukri> [login|--live] [--show|--minimize] [--scheduled]');
+  console.log('Usage: node auto-apply-runner.js <indeed|wellfound|naukri> [login | --test --only=<id|url,…> | --live --confirm-live] [--show|--minimize] [--scheduled]');
   process.exit(1);
 }
+// Only ledger sites have the click gate in their page script; anywhere else TEST would
+// turn DRY_RUN off with nothing to stop a click.
+if (MODE === 'TEST' && !site.ledger) { console.log(`Usage error: --test is only supported for naukri`); process.exit(1); }
 
 // Hard daily cap per site, tracked across runs in a state file — multiple logons in
 // one day resume the count instead of restarting it, and stop dead at the cap.
@@ -145,8 +168,21 @@ const run = site.ledger ? require('./naukri-ledger').startRun({ dailyCap: DAILY_
 if (run) dayState.count = run.today;
 else try { const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8').replace(/^﻿/, '')); if (s.date === todayKey) dayState = s; } catch (e) {}
 const bumpDayCount = () => { dayState.count++; try { fs.writeFileSync(STATE_FILE, JSON.stringify(dayState)); } catch (e) {} };
-// per-run target (site.perRun) capped by whatever is left of the daily allowance
-const TARGET = run ? run.target : Math.min(site.perRun || DAILY_CAP, DAILY_CAP - dayState.count);
+// per-run target (site.perRun) capped by whatever is left of the daily allowance;
+// a TEST run can never want more than its allow-list
+const TARGET = run ? (MODE === 'TEST' ? Math.min(run.target, POLICY.allow.size) : run.target)
+  : Math.min(site.perRun || DAILY_CAP, DAILY_CAP - dayState.count);
+// Company-site jobs parked outside the ledger (naukri-deferred.js), excluded from later runs.
+const deferred = run ? require('./naukri-deferred') : null;
+const deferredIds = deferred ? deferred.ids() : new Set();
+// TEST ends once every allow-listed job reached a final outcome (or was deferred).
+const testSeen = new Set();
+let testDone = false;
+const markTested = (id) => {
+  if (MODE !== 'TEST' || !POLICY.allow.has(id)) return;
+  testSeen.add(id);
+  if (testSeen.size >= POLICY.allow.size) testDone = true;
+};
 // ponytail: company-site applies are paused on ledger sites — they are not recorded in
 // the ledger yet, so they could be repeated every run and would escape both caps.
 // Re-enable when external results are written to the ledger (Phase 2C).
@@ -199,7 +235,11 @@ function buildInjection(max = TARGET) {
   // job ids and the ledger's own jobId() so both sides compute identical ids.
   return `(async () => {
     if (window.__aaBusy) return; window.__aaBusy = true;
-    window.__APPLY_CONFIG = ${JSON.stringify({ CV, geminiKey, seen: [...seenJobs], ...(run ? run.browserConfig() : {}) })};
+    window.__APPLY_CONFIG = ${JSON.stringify({ CV, geminiKey, seen: [...seenJobs], ...(run ? {
+      excluded: [...new Set([...run.browserConfig().excluded, ...deferredIds])],
+      // TEST: allow-listed job URLs are opened directly, before any search card
+      directJobs: POLICY.directUrls.map((u) => ({ href: u, id: require('./naukri-ledger').jobId(u) })),
+    } : {}) })};
     ${run ? `window.__aaJobId = ${require('./naukri-ledger').jobId.toString()};` : ''}
     try { await ${raw}
     } finally { window.__aaBusy = false; }
@@ -207,6 +247,24 @@ function buildInjection(max = TARGET) {
 }
 
 (async () => {
+  // LIVE needs an explicit second yes: --confirm-live, or typing LIVE at an interactive prompt.
+  if (MODE === 'LIVE' && !LOGIN_MODE && !POLICY.confirmed) {
+    if (!process.stdin.isTTY) {
+      log('Refusing LIVE: no --confirm-live and no interactive terminal to confirm in.');
+      process.exit(1);
+    }
+    const rl = require('readline').createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise((r) => rl.question('Type LIVE to submit REAL applications (anything else aborts): ', r));
+    rl.close();
+    if (answer.trim() !== 'LIVE') { log('LIVE not confirmed — aborting. Nothing was started.'); process.exit(1); }
+    POLICY.confirmed = true;
+  }
+  if (MODE === 'LIVE' && !LOGIN_MODE) {
+    log('==================================================');
+    log('  LIVE — REAL APPLICATIONS WILL BE SUBMITTED');
+    log('==================================================');
+  }
+  if (MODE === 'TEST') log(`TEST — real clicks ONLY for job ids: ${[...POLICY.allow].join(', ')}`);
   if (SCHEDULED && !LOGIN_MODE) {
     const hour = new Date().getHours();
     if (hour < ACTIVE_FROM || hour >= ACTIVE_UNTIL) {
@@ -281,7 +339,8 @@ function buildInjection(max = TARGET) {
 
   if (run) log(`Ledger: ${run.today}/${DAILY_CAP} APPLIED today, ${run.excluded.size} job ids permanently excluded` +
     (EXTERNAL_ON ? '' : ' — company-site applies paused until they are ledger-recorded'));
-  log(`Starting. mode=${LIVE ? 'LIVE' : 'DRY RUN'} target=${TARGET} applications, max ${MAX_RUNTIME_MS / 60000} min`);
+  if (run && deferredIds.size) log(`Deferred company-site jobs excluded: ${deferredIds.size}`);
+  log(`Starting. mode=${MODE === 'DRY' ? 'DRY RUN' : MODE} target=${TARGET} applications, max ${MAX_RUNTIME_MS / 60000} min`);
   const deadline = Date.now() + MAX_RUNTIME_MS;
   let submitted = 0;
   let lastActivity = Date.now();
@@ -446,6 +505,13 @@ function buildInjection(max = TARGET) {
         } else log(`  (dry run — would record ${r.status}: ${r.reason})`);
         return { remaining: TARGET - submitted };
       }
+      const rid = require('./naukri-ledger').jobId(r.url);
+      if (MODE === 'TEST' && !POLICY.allow.has(rid)) {
+        // TEST writes the ledger only for its allow-listed jobs; anything else was never clicked
+        run.excluded.add(rid);
+        log(`  (TEST — ${rid} is not allow-listed; ${r.status}: ${r.reason} not recorded)`);
+        return { remaining: testDone ? 0 : TARGET - submitted };
+      }
       if (r.status === 'APPLIED') {
         const v = await verifyNaukriApplied(source.context, r.url);
         const already = r.reason === 'already-applied';
@@ -466,10 +532,19 @@ function buildInjection(max = TARGET) {
       } else if (r.status === 'FAILED' || r.status === 'SKIPPED') {
         run.record(r);
       }
+      markTested(rid);
     } catch (e) {
       log('ledger/report error (nothing counted): ' + String(e.message || e).split('\n')[0]);
     }
-    return { remaining: TARGET - submitted };
+    return { remaining: testDone ? 0 : TARGET - submitted };
+  }
+
+  /** window.__aaMayClick(jobId): the page asks before every real Apply click. */
+  function onMayClick(source, id) {
+    const ok = mayClick(POLICY, String(id || ''));
+    log(`  🔒 click gate: ${id} → ${ok ? 'ALLOW' : 'DENY'} (${MODE})`);
+    if (!ok && run) run.excluded.add(String(id)); // not again this run
+    return ok;
   }
 
   function wire(page) {
@@ -531,7 +606,16 @@ function buildInjection(max = TARGET) {
 
       const ext = clean.match(/🔗 EXTERNAL \| (.+) \| (\S+)/);
       // ledger sites: don't re-offer a handed-off job to later injections of this run
-      if (ext && run) run.excluded.add(require('./naukri-ledger').jobId(ext[2]));
+      if (ext && run) {
+        const eid = require('./naukri-ledger').jobId(ext[2]);
+        run.excluded.add(eid);
+        if (LIVE && !deferredIds.has(eid)) { // dry runs write nothing
+          try {
+            if (deferred.defer({ url: ext[2], title: ext[1].trim() }, deferred.DEFERRED, deferredIds)) log(`  ↪ deferred company-site job ${eid} (naukri-deferred.jsonl)`);
+          } catch (e) { log('deferred write failed: ' + e.message); }
+        }
+        markTested(eid);
+      }
       if (ext && !externalSeen.has(ext[2])) {
         externalSeen.add(ext[2]);
         externalQueue.push({ title: ext[1].trim(), href: ext[2].trim() });
@@ -599,7 +683,10 @@ function buildInjection(max = TARGET) {
   async function session() {
   const ctx = await launch();
   await tuckAway(ctx);
-  if (run) await ctx.exposeBinding('__aaReport', onReport);
+  if (run) {
+    await ctx.exposeBinding('__aaReport', onReport);
+    await ctx.exposeBinding('__aaMayClick', onMayClick);
+  }
 
   // Seed the seen-list from the site's own applied list. The in-page list lives in
   // localStorage that wellfound's role/job pages do not share across navigations, and
@@ -637,7 +724,7 @@ function buildInjection(max = TARGET) {
 
   // Supervisor: re-inject the search tab when idle, close finished form tabs,
   // rotate searches on inactivity, stop on target/time.
-  while (submitted < TARGET && Date.now() < deadline) {
+  while (submitted < TARGET && Date.now() < deadline && !testDone) {
     await new Promise((r) => setTimeout(r, 45000));
 
     const pages = ctx.pages();
@@ -719,7 +806,7 @@ function buildInjection(max = TARGET) {
   // Close-and-reopen loop: a session that ends early (feed exhausted, tab wedged,
   // browser crash) costs a fresh browser, not the run. `submitted` and `deadline`
   // live outside, so restarts resume toward the same 30 rather than starting over.
-  for (let attempt = 1; submitted < TARGET && Date.now() < deadline; attempt++) {
+  for (let attempt = 1; submitted < TARGET && Date.now() < deadline && !testDone; attempt++) {
     if (attempt > 1) log(`↻ Reopening browser (attempt ${attempt}/${MAX_RESTARTS}) — ${submitted}/${TARGET} done so far`);
     try {
       await session();
@@ -735,12 +822,13 @@ function buildInjection(max = TARGET) {
         continue;
       }
     }
-    if (submitted >= TARGET || Date.now() >= deadline || searchesExhausted) break;
+    if (submitted >= TARGET || Date.now() >= deadline || searchesExhausted || testDone) break;
     if (attempt >= MAX_RESTARTS) { log(`Stopping after ${MAX_RESTARTS} browser restarts — no more jobs to apply to.`); break; }
     await new Promise((r) => setTimeout(r, 15000)); // let the profile lock clear before relaunching
   }
 
   log(`Finished: ${submitted}/${TARGET} applications ${LIVE ? 'submitted' : 'simulated (dry run)'}.`);
+  if (surfacedErrors) log(`⚠ ${surfacedErrors} unexpected error(s) were logged during this run — see ERROR lines above.`);
   if (site.externalApply) {
     log(`External (company site): ${extStats.applied} applied, ${extStats.skipped} skipped (account required / not a form), ` +
         `${extStats.failed} failed, ${externalQueue.length} left in queue.`);

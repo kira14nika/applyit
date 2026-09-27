@@ -6,8 +6,8 @@
  *   FAILED   anything else                never counts, NOT excluded (retry later)
  * Every function takes an optional file path so tests never touch the real ledger.
  */
-const fs = require('fs');
 const path = require('path');
+const { readJsonl, appendJsonl } = require('./jsonl');
 
 const LEDGER = path.join(__dirname, 'naukri-ledger.jsonl');
 const STATUSES = ['APPLIED', 'SKIPPED', 'FAILED'];
@@ -30,16 +30,7 @@ function jobId(url) {
 
 /** All well-formed records. Creates the file if missing; skips blank and corrupt lines. */
 function load(file = LEDGER) {
-  fs.closeSync(fs.openSync(file, 'a'));
-  const out = [];
-  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      const r = JSON.parse(line);
-      if (r && STATUSES.includes(r.status) && r.jobId) out.push(r);
-    } catch (e) { /* a torn or hand-mangled line must not take the bot down */ }
-  }
-  return out;
+  return readJsonl(file).filter((r) => STATUSES.includes(r.status) && r.jobId);
 }
 
 /**
@@ -63,17 +54,7 @@ function append(record, file = LEDGER) {
     reason: String(record.reason || ''),
   };
   if (!rec.jobId) throw new Error('ledger: record has no url/jobId');
-  let lead = '';
-  if (fs.existsSync(file)) {
-    const { size } = fs.statSync(file);
-    if (size) {
-      const fd = fs.openSync(file, 'r'); const b = Buffer.alloc(1);
-      fs.readSync(fd, b, 0, 1, size - 1); fs.closeSync(fd);
-      if (b[0] !== 10) lead = '\n';
-    }
-  }
-  fs.appendFileSync(file, lead + JSON.stringify(rec) + '\n');
-  return rec;
+  return appendJsonl(file, rec);
 }
 
 /**

@@ -6,6 +6,10 @@
 applications*.csv
 apply-state-*.json
 naukri-ledger.jsonl
+naukri-deferred.jsonl
+naukri-history.jsonl
+profile.json
+preferences.json
 *.png
 
 # saved browser sessions (contain logged-in cookies)

@@ -305,6 +305,12 @@
       return true;
     }
 
+    // Click gate: Node decides (DRY never, TEST only allow-listed ids, LIVE when
+    // confirmed). No binding, an error, or anything but an explicit true = no click.
+    let allowed = false;
+    try { allowed = typeof window.__aaMayClick === 'function' && (await window.__aaMayClick(job.id)) === true; } catch (e) { allowed = false; }
+    if (!allowed) { log(`  🔒 click not allowed by the runner for ${job.id} — not submitting.`); return 'denied'; }
+
     applyBtn.scrollIntoView({ block: 'center', inline: 'center' });
     applyBtn.focus();
     applyBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: popup }));
@@ -429,7 +435,10 @@
     let job = null;
 
     let nSeen = 0, nFiltered = 0;
-    for (const card of cards) {
+    // TEST: allow-listed job URLs given on the command line come first, opened directly
+    const direct = (__CFG.directJobs || []).find((d) => d.id && !EXCLUDED.has(d.id));
+    if (direct) job = { href: direct.href, id: direct.id, title: '(test job)', company: '', card: null };
+    for (const card of (job ? [] : cards)) {
       const link = card.querySelector(SELECTORS.jobTitleLink);
       if (!link) continue;
       const title = link.textContent.replace(/\s+/g, ' ').trim();
@@ -462,7 +471,7 @@
     state[SEEN_KEY].push(job.href); // legacy; no longer read for exclusion
     saveState();
     log(`▶ Applying: ${job.title} | ${job.href}`);
-    job.card.scrollIntoView({ block: 'center' });
+    job.card?.scrollIntoView({ block: 'center' });
 
     why = '';
     const ok = await applyInPopup(popup, job);
@@ -476,6 +485,7 @@
     } else if (ok === false) {
       await report(job, 'FAILED', why || 'unknown');
     }
+    // ok === 'denied': the click gate said no — nothing happened, nothing to record
     if (ok === 'external') {
       extQueued++;
       // The runner applies on the employer's own site, but it can only do that while
