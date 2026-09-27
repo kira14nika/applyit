@@ -14,7 +14,9 @@
  */
 const path = require('path');
 const fs = require('fs');
-const { CV, geminiKey, resumePath: RESUME_PATH } = require('./config'); // personal data from .env
+const { CV, geminiKey, geminiModel, resumePath: RESUME_PATH } = require('./config'); // personal data from .env
+const answerEngine = require('./answer-engine');
+const history = require('./naukri-history');
 const { minimizeBrowserWindows, hideBrowserWindows, SHOW_FLAG } = require('./window-utils');
 const { applyExternal } = require('./external-apply'); // "Apply on company site" jobs, driven from Node
 // stealth patches the fingerprint leaks reCAPTCHA uses to flag automation; falls back to plain playwright
@@ -193,6 +195,14 @@ const IDLE_ROTATE_MS = 4 * 60 * 1000;
 
 const log = (msg) => console.log(`[${new Date().toLocaleString()}] [${SITE_ARG}] ${msg}`);
 
+// Detail sidecar (naukri-history.jsonl): every mode writes it, tagged with the mode, so
+// dry runs are inspectable too. It never feeds a count — the ledger alone does that.
+const RUN_ID = history.newRunId();
+const historyAppend = (rec) => {
+  if (!run) return;
+  try { history.append({ runId: RUN_ID, mode: MODE, ...rec }); } catch (e) { log('history write failed: ' + e.message); }
+};
+
 // ======== CSV log of every submitted application (created once, appended forever) ========
 const CSV_FILE = path.join(__dirname, 'applications.csv');
 const SKILLS = ['JavaScript', 'TypeScript', 'Python', 'Java', 'React', 'Next.js', 'React Native', 'Node.js',
@@ -235,11 +245,12 @@ function buildInjection(max = TARGET) {
   // job ids and the ledger's own jobId() so both sides compute identical ids.
   return `(async () => {
     if (window.__aaBusy) return; window.__aaBusy = true;
-    window.__APPLY_CONFIG = ${JSON.stringify({ CV, geminiKey, seen: [...seenJobs], ...(run ? {
+    window.__APPLY_CONFIG = ${JSON.stringify({ seen: [...seenJobs], ...(run ? {
+      // ledger sites answer in Node (__aaAnswer): no CV and no API key ever enter the page
       excluded: [...new Set([...run.browserConfig().excluded, ...deferredIds])],
       // TEST: allow-listed job URLs are opened directly, before any search card
       directJobs: POLICY.directUrls.map((u) => ({ href: u, id: require('./naukri-ledger').jobId(u) })),
-    } : {}) })};
+    } : { CV, geminiKey }) })};
     ${run ? `window.__aaJobId = ${require('./naukri-ledger').jobId.toString()};` : ''}
     try { await ${raw}
     } finally { window.__aaBusy = false; }
@@ -530,13 +541,38 @@ function buildInjection(max = TARGET) {
           log(`  ❌ not verified (${v}) — recorded FAILED, not counted`);
         }
       } else if (r.status === 'FAILED' || r.status === 'SKIPPED') {
-        run.record(r);
+        run.record(r); // ledger keeps only whitelisted fields; details go to history below
+        if (r.status === 'SKIPPED') {
+          log(`  ⏭ SKIPPED — ${r.reason}${r.intervention?.question ? ` | Q: "${String(r.intervention.question).slice(0, 80)}"` : ''}`);
+          // Apply was clicked and the questionnaire abandoned: what does Naukri show now?
+          // Observation only — it never changes the ledger or any count.
+          const afterAbandon = r.clicked ? await verifyNaukriApplied(source.context, r.url) : null;
+          if (afterAbandon) log(`  (after abandoning, the job page reads: ${afterAbandon})`);
+          historyAppend({ type: 'intervention', jobId: rid, url: r.url, title: r.title, company: r.company,
+            status: 'SKIPPED', reason: r.reason, intervention: r.intervention || null, clicked: !!r.clicked,
+            pageStateAfterAbandon: afterAbandon });
+        }
       }
       markTested(rid);
     } catch (e) {
       log('ledger/report error (nothing counted): ' + String(e.message || e).split('\n')[0]);
     }
     return { remaining: testDone ? 0 : TARGET - submitted };
+  }
+
+  /**
+   * window.__aaAnswer({question, options, numeric, job}) — the page's only source of
+   * answers. Facts come from the user's own data, then Gemini; never a fallback.
+   */
+  const FACTS = answerEngine.buildFacts(CV);
+  async function onAnswer(source, q) {
+    const res = await answerEngine.answer(q, { facts: FACTS, apiKey: geminiKey, model: geminiModel || answerEngine.DEFAULT_MODEL });
+    log(res.status === 'answered'
+      ? `  💬 answered (${res.source}) from ${String(res.evidence).slice(0, 60)}`
+      : `  ❔ unknown (${res.category}): ${String(res.missing).slice(0, 100)}`);
+    historyAppend({ type: 'answer', jobId: q?.job?.id || '', question: q?.question || '', options: q?.options || [],
+      numeric: !!q?.numeric, result: res });
+    return res;
   }
 
   /** window.__aaMayClick(jobId): the page asks before every real Apply click. */
@@ -686,6 +722,7 @@ function buildInjection(max = TARGET) {
   if (run) {
     await ctx.exposeBinding('__aaReport', onReport);
     await ctx.exposeBinding('__aaMayClick', onMayClick);
+    await ctx.exposeBinding('__aaAnswer', onAnswer);
   }
 
   // Seed the seen-list from the site's own applied list. The in-page list lives in

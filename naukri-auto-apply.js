@@ -17,9 +17,10 @@
  * WHAT IT DOES PER JOB:
  * - Skips "Apply on company site" (external) and already-applied jobs.
  * - Clicks Apply (one-click — Naukri sends your profile + resume).
- * - If Naukri's chatbot questionnaire pops up, answers each question from the
- *   QA bank below (radio/chip options: picks the "yes/willing" style one;
- *   text questions: typed answer). Unmatched questions optionally go to Gemini.
+ * - If Naukri's chatbot questionnaire pops up, each question is sent to the
+ *   runner's answer engine (Node: the user's own facts, then Gemini). If no
+ *   truthful answer exists the questionnaire is abandoned and the job SKIPPED.
+ *   Pasted by hand (no runner) the script can never answer, and never clicks.
  *
  * NOTES:
  * - When the current results page is exhausted it clicks Next — that reloads
@@ -46,7 +47,6 @@
     // than anything the stealth plugin can hide. 10 jobs now take ~8-20 minutes.
     MIN_DELAY_MS: 45000,
     MAX_DELAY_MS: 120000,
-    geminiKey: __CFG.geminiKey || '',   // optional: Gemini API key for unmatched chatbot questions
 
     // Job titles to apply to (case-insensitive substring match on the job title)
     TITLE_KEYWORDS: [
@@ -62,50 +62,9 @@
     ],
   };
 
-  // ======================= CV DATA (from .env via the runner) =======================
-  const CV = __CFG.CV || {
-    name: '', email: '', phone: '', location: '', currentRole: '', company: '', education: '',
-    yearsOfExperience: '', yearsNumber: '1', skills: '', highlights: ['', '', '', '', ''], noticePeriod: '',
-    currentCTC: '', expectedCTC: '', currentSalary: '', expectedSalary: '', dob: '', gender: '',
-    workAuth: '', github: '', linkedin: '', portfolio: '', links: '', remoteOk: '', relocate: '', startDate: '',
-  };
-
-  // ============== QUESTION → ANSWER BANK ==============
-  // First pattern that matches the question text wins. Naukri chatbot questions
-  // are often numeric/short — keep those answers terse.
-  const QA_BANK = [
-    [/company name|current (company|employer)|organi[sz]ation/i, CV.company],
-    [/notice period|when can you (start|join)|start date|joining|how soon/i, CV.noticePeriod],
-    [/current .{0,15}(ctc|salary|compensation|annual)/i, CV.currentCTC],          // bare lakhs number
-    [/(expected|desired) .{0,15}(ctc|salary|compensation|pay)|salary expectation/i, CV.expectedCTC], // bare lakhs
-    [/machine learning|deep learning|ml experience/i, '3'],
-    [/years? of (work |professional |total |relevant )?experience|how (long|many years)|total experience|relevant experience/i, CV.yearsNumber || '1'],
-    [/remote|work from home|wfh/i, CV.remoteOk],
-    [/reloc|move to|shift to|based out of|work from (our )?office|commute|on-?site/i, CV.relocate],
-    [/e-?mail/i, CV.email], // before location — "Email address" must not match /address/
-    [/where are you .{0,15}(based|located)|current location|city|address/i, CV.location],
-    [/visa|sponsorship|work authorization|legally authorized|right to work|citizen/i, CV.workAuth],
-    [/\blinkedin\b/i, CV.linkedin],
-    [/\bgithub\b/i, CV.github],
-    [/portfolio|personal website/i, CV.portfolio],
-    [/linkedin|github|portfolio|website|link/i, CV.links],
-    [/why (do you want|are you interested|this role|this company|us|join)/i,
-      `I enjoy turning business data into clear insights and practical decisions. ${CV.highlights[0] || ''}. This role aligns well with my experience in data analysis, Power BI, SQL and business reporting.`],
-    [/tell (us|me) about yourself|introduce yourself|about you|summary/i,
-      `I'm ${CV.name}, ${CV.currentRole}. ${CV.highlights[0] || ''}. Previously: ${CV.highlights[2] || ''}. ${CV.highlights[3] || ''}.`],
-    [/power bi|powerbi|business intelligence|bi tool|dashboard|reporting/i,
-      `I have hands-on experience building interactive Power BI dashboards and automated reports to monitor business KPIs and support management decision-making.`],
-    [/sql|database|query/i,
-      `I have hands-on SQL experience, including joins, CTEs, window functions, subqueries, aggregations, data cleaning and business-focused analysis.`],
-    [/python|pandas|numpy|data analysis|data analytics|statistical/i,
-      `I use Python with Pandas and NumPy for data cleaning, exploratory analysis, visualization and analytical modeling.`],
-    [/education|degree|university|college|qualification/i, CV.education],
-    [/phone|contact number|mobile/i, CV.phone],
-    [/^name$|your name|full name|candidate name|first name/i, CV.name],
-  ];
-
-  const GENERIC_ANSWER =
-    `I'm ${CV.name}, ${CV.currentRole}. ` + (CV.highlights[0] || '') + '.';
+  // No personal data and no answers live in this page. Every chatbot question goes to
+  // the runner's answer engine (answer-engine.js, in Node) through __aaAnswer; if it
+  // cannot establish a truthful answer the job is SKIPPED, never guessed.
 
   // ======================= HELPERS =======================
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -142,31 +101,30 @@
     return null;
   }
 
-  async function answerQuestion(questionText) {
-    for (const [pattern, answer] of QA_BANK) {
-      if (pattern.test(questionText)) return answer;
+  /** Ask the runner. Missing binding or any error = unknown (never a local fallback). */
+  async function askRunner(payload) {
+    if (typeof window.__aaAnswer !== 'function') {
+      return { status: 'unknown', category: 'unanswerable-question', missing: 'no answer engine (script not run by the runner)' };
     }
-    if (CONFIG.geminiKey) {
-      try {
-        const res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${CONFIG.geminiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ parts: [{ text:
-                `You are answering a job application chatbot question on my behalf. Answer in first person, 1-3 sentences, professional, no markdown. If the question expects a number, answer with just the number.\n\nMy CV:\n${JSON.stringify(CV)}\n\nQuestion: ${questionText}` }] }],
-            }),
-          }
-        );
-        const data = await res.json();
-        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-        if (text) return text;
-      } catch (e) {
-        log('Gemini call failed, using generic answer:', e.message);
-      }
-    }
-    return GENERIC_ANSWER;
+    try { return (await window.__aaAnswer(payload)) || { status: 'unknown', category: 'ai-error', missing: 'empty reply' }; }
+    catch (e) { return { status: 'unknown', category: 'ai-error', missing: `answer engine error: ${e.message}` }; }
+  }
+
+  /** Something only a human can do, visible in the application popup right now. */
+  function detectBlocker(d) {
+    if (!d || !d.body) return null;
+    if (d.querySelector('iframe[src*="recaptcha" i], iframe[src*="hcaptcha" i], .g-recaptcha, [class*="captcha" i]')) return 'captcha';
+    if (/\b(enter|verify|resend) (the )?otp\b|one[- ]time password/i.test(d.body.innerText || '')) return 'otp';
+    return null;
+  }
+
+  /** Best-effort job context for the answer engine (the popup shows the job page). */
+  function jobContext(d, job) {
+    const q = (s) => d?.querySelector(s)?.innerText?.trim() || '';
+    return {
+      id: job.id, title: job.title, company: job.company,
+      description: (q('[class*="job-desc" i]') || q('[class*="JDC" i]') || q('section[class*="description" i]')).slice(0, 2500),
+    };
   }
 
   // ======================= SELECTORS (edit here if Naukri changes) =======================
@@ -213,37 +171,53 @@
   };
 
   // ======================= CHATBOT QUESTIONNAIRE (inside popup) =======================
-  async function handleChatbot(doc) {
-    const YES = /yes|willing|open to|agree|relocat|remote|immediat|i am able|i can|bengaluru|bangalore/i;
-
+  // Returns true when the questionnaire closed, otherwise an intervention object
+  // {category, question, options, missing, stage} — the caller records SKIPPED (or
+  // FAILED for a transient ai-error). Nothing is ever guessed or defaulted.
+  async function handleChatbot(doc, job) {
+    const stop = (category, question, options, missing) => {
+      log(`  ⏭ chatbot stopped — ${category}${missing ? `: ${missing}` : ''}`);
+      return { category, question: question || '', options: options || [], missing: missing || '', stage: 'application questionnaire' };
+    };
+    let lastAnswered = null;
     for (let turn = 0; turn < 15; turn++) {
       await sleep(2500);
       const drawer = doc.querySelector(SELECTORS.chatbot);
       if (!drawer || !visible(drawer)) return true;    // chatbot gone → done
+      const blocker = detectBlocker(doc);
+      if (blocker) return stop(blocker, '', [], `${blocker} shown during the questionnaire`);
 
       // Latest bot question = last non-empty bot message in the drawer
       const msgs = [...drawer.querySelectorAll(SELECTORS.botMessage)]
         .map((m) => m.textContent.trim()).filter(Boolean);
       const question = msgs[msgs.length - 1] || drawer.textContent.trim().slice(0, 200);
       log(`  🤖 Q: "${question.slice(0, 80)}"`);
+      // the same question again right after we answered it: our answer was not accepted
+      if (lastAnswered && question === lastAnswered) return stop('unexpected-behaviour', question, [], 'the same question came back after it was answered');
 
-      // 1. Option chips / radios / checkboxes → pick the YES-style one, else the first
       const options = [...drawer.querySelectorAll(SELECTORS.chatOption)].filter(visible)
         .filter((o) => o.textContent.trim().length > 0 && o.textContent.trim().length < 60);
+      const input = options.length ? null : [...drawer.querySelectorAll(SELECTORS.chatInput)].filter(visible).pop();
+      if (!options.length && !input) return stop('unsupported-form', question, [], 'no options and no input field found');
+      const optionTexts = options.map((o) => o.textContent.trim());
+      const numeric = !!input && (input.type === 'number' || /numeric|decimal/.test(input.inputMode || ''));
+      const res = await askRunner({ question, options: optionTexts, numeric, job: jobContext(doc, job) });
+      if (res.status !== 'answered') return stop(res.category || 'unanswerable-question', question, optionTexts, res.missing);
+
       if (options.length) {
-        const pick = options.find((o) => YES.test(o.textContent)) || options[0];
+        // only the option whose text IS the validated answer — never a default
+        const pick = options.find((o) => o.textContent.trim() === res.answer);
+        if (!pick) return stop('unexpected-behaviour', question, optionTexts, `answer "${res.answer}" matched no option element`);
         pick.scrollIntoView({ block: 'center', inline: 'center' });
         pick.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: doc.defaultView }));
         await sleep(100);
         pick.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: doc.defaultView }));
         await sleep(100);
         pick.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: doc.defaultView }));
-        log(`  ☑ picked option: "${pick.textContent.trim().slice(0, 50)}"`);
+        log(`  ☑ picked option: "${pick.textContent.trim().slice(0, 50)}" (${res.source}: ${String(res.evidence).slice(0, 60)})`);
       } else {
-        // 2. Free-text answer into the contenteditable / input
-        const input = [...drawer.querySelectorAll(SELECTORS.chatInput)].filter(visible).pop();
-        if (!input) { log('  ⚠ chatbot: no options and no input found — finish it manually.'); return false; }
-        const answer = await answerQuestion(question);
+        // Free-text answer into the contenteditable / input
+        const answer = res.answer;
         if (input.isContentEditable) {
           // execCommand performs a real edit, so the browser fires a trusted
           // input event; setting .textContent left the framework's state empty.
@@ -257,8 +231,9 @@
           Object.getOwnPropertyDescriptor(proto, 'value').set.call(input, answer);
           input.dispatchEvent(new Event('input', { bubbles: true }));
         }
-        log(`  ✍ A: "${String(answer).slice(0, 60)}"`);
+        log(`  ✍ A: "${String(answer).slice(0, 60)}" (${res.source}: ${String(res.evidence).slice(0, 60)})`);
       }
+      lastAnswered = question;
 
       await sleep(800);
       const send = findButtonByText(drawer, SELECTORS.chatSendText) ||
@@ -271,12 +246,12 @@
         input?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
       }
     }
-    log('  ⚠ chatbot: too many turns — finish it manually.');
-    return false;
+    return stop('manual-flow', '', [], 'questionnaire still open after 15 turns');
   }
 
   // ======================= APPLY TO ONE JOB (in popup) =======================
   let why = ''; // reason for the last `return false`, reported to the runner as FAILED
+  let intervention = null; // details for the last `return 'skipped'`, reported as SKIPPED
   async function applyInPopup(popup, job) {
     popup.location.href = job.href;
     const applyBtn = await waitFor(() => {
@@ -349,14 +324,25 @@
       const d = doc();
       if (!d || !d.body) return null;
       if (SELECTORS.alreadyAppliedToast.test(d.body.textContent)) return 'duplicate';
+      if (detectBlocker(d)) return 'blocker';
       const drawer = d.querySelector(SELECTORS.chatbot);
       if (drawer && visible(drawer)) return 'chatbot';
       return confirmed() ? 'applied' : null;
     }, 10000);
     if (outcome === 'duplicate') { log('  ↩ already applied to this job — not counting it.'); return 'already-applied'; }
+    if (outcome === 'blocker') {
+      const category = detectBlocker(doc()) || 'unexpected-behaviour';
+      intervention = { category, question: '', options: [], missing: `${category} shown after clicking Apply`, stage: 'after Apply click' };
+      return 'skipped';
+    }
     if (outcome === 'chatbot') {
-      const ok = await handleChatbot(doc());
-      if (!ok) { why = 'chatbot questionnaire not completed'; return false; }
+      const res = await handleChatbot(doc(), job);
+      if (res !== true) {
+        // a transient AI failure is retryable (FAILED); everything else needs a human (SKIPPED)
+        if (res.category === 'ai-error') { why = `ai-error: ${res.missing}`; return false; }
+        intervention = res;
+        return 'skipped';
+      }
     }
 
     // Confirm success (toast or Apply button turned into "Applied")
@@ -422,10 +408,10 @@
   const EXCLUDED = new Set(__CFG.excluded || []);
   const idOf = window.__aaJobId || ((u) => u);
   let remaining = CONFIG.MAX_APPLICATIONS;
-  const report = async (job, status, reason) => {
+  const report = async (job, status, reason, extra = {}) => {
     if (typeof window.__aaReport !== 'function') return null; // pasted by hand: no runner
     try {
-      return await window.__aaReport({ url: job.href, title: job.title, company: job.company, route: 'naukri', status, reason });
+      return await window.__aaReport({ url: job.href, title: job.title, company: job.company, route: 'naukri', status, reason, ...extra });
     } catch (e) { log('  report to runner failed:', e.message); return null; }
   };
 
@@ -474,6 +460,7 @@
     job.card?.scrollIntoView({ block: 'center' });
 
     why = '';
+    intervention = null;
     const ok = await applyInPopup(popup, job);
     // Strictly true: 'external' is truthy and must not be counted as an application.
     // A claim is only a claim: the runner re-verifies it and answers with what is left.
@@ -484,6 +471,10 @@
       log(`  remaining this run: ${remaining}`);
     } else if (ok === false) {
       await report(job, 'FAILED', why || 'unknown');
+    } else if (ok === 'skipped') {
+      // Apply WAS clicked; the runner stores the details and, after a SKIPPED, looks
+      // at what Naukri now shows for the job (history only — counts are untouched).
+      await report(job, 'SKIPPED', `human-needed: ${intervention.category}`, { intervention, clicked: true });
     }
     // ok === 'denied': the click gate said no — nothing happened, nothing to record
     if (ok === 'external') {

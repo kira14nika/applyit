@@ -27,7 +27,33 @@ Not verified: TEST and LIVE modes were never run (hard rule). `--scheduled` hour
 tasks (`setup-schedule.ps1`) now also need `--confirm-live` to run live — scheduling is
 out of scope and was not changed.
 
-## Next — Phase 2: truthful answers
-Remove invented answers (YES/first-option picker, GENERIC_ANSWER, canned QA_BANK
-narratives), move Gemini into Node behind `__aaAnswer`, SKIPPED + intervention details
-for anything unknown.
+## Phase 2 — Truthful answers ✅
+
+| What | Where |
+|---|---|
+| Removed from the page: `QA_BANK` (incl. ML = `3`, canned SQL/Power BI/Python paragraphs, relocate/remote sentences), `GENERIC_ANSWER`, the YES-regex / first-option picker, the in-page Gemini `fetch`, the CV object | `naukri-auto-apply.js` |
+| Naukri's `__APPLY_CONFIG` no longer carries the CV or the API key (Indeed/Wellfound unchanged — out of scope) | runner `buildInjection` |
+| Answer engine in Node behind `__aaAnswer({question, options, numeric, job})`: direct factual lookup (only non-empty values; derived sentences and config defaults are not facts), then Gemini | `answer-engine.js`, runner `onAnswer` |
+| Gemini: model from `GEMINI_MODEL` (default `gemini-2.5-flash`), key in the `x-goog-api-key` header, only relevant facts (no email/phone/DOB/gender unless the question is about them), JSON `{status, answer, evidence, missing}`, temperature 0 | `answer-engine.js` |
+| Validation: option answers must be one of the options verbatim, numeric answers must be numbers, no evidence = unknown | `validate()` |
+| Unknown → the chatbot stops, job reported `SKIPPED` with reason `human-needed: <category>`; full details (question, options, stage, missing info, clicked) go to `naukri-history.jsonl`, never into the ledger | page `handleChatbot`, runner `onReport` |
+| Categories: unanswerable-question, missing-info, captcha, otp, unsupported-form, manual-flow, unexpected-behaviour (login is defined, not auto-detected — a logged-out session must not permanently skip jobs) | page `detectBlocker`/`handleChatbot` |
+| Loop prevention: same question back after answering → unexpected-behaviour; 15 turns → manual-flow | `handleChatbot` |
+| After a SKIPPED with Apply clicked, Node reloads the job and logs what Naukri shows (history only, no count change) — for learning what an abandoned questionnaire does | runner `onReport` |
+| `node answer-engine.js --check` verifies the key + model respond | `answer-engine.js` |
+
+Design decision (flagging): a transient AI failure (`ai-error`: HTTP error, network,
+non-JSON) is recorded **FAILED** (retryable, plan §9 "technical problem"), not SKIPPED,
+so a Gemini outage cannot permanently close jobs. A missing `GEMINI_KEY` is treated as
+"needs a human" → SKIPPED.
+
+Tests: `answer-engine.test.js` (mocked Gemini: answered, unknown, invalid option,
+invalid number, no evidence, HTTP/network/non-JSON errors → unknown with no answer,
+no key → no request, key in header not URL, contact details withheld, page source has
+no answers/CV/key).
+
+Not verified: `GEMINI_KEY` is empty in this `.env`, so no real model call was made —
+run `node answer-engine.js --check` after adding a key. The in-page chatbot path is not
+exercised by any test (it only appears after a real Apply click); see CONTROLLED-TEST.md.
+
+## Next — Phase 3: structured events + history
