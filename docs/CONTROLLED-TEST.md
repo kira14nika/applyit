@@ -12,19 +12,16 @@ Run it yourself, watching. Budget ~15 minutes.
 ## 0. Before you start
 
 1. **No other run is active** (the app's Running page is idle, no `auto-apply-runner` in Task Manager).
-2. **Decide about AI answers.**
-   - With a Gemini key: add `GEMINI_KEY=…` (and optionally `GEMINI_MODEL=…`) to `.env`, then check it:
-     ```bash
-     node answer-engine.js --check
-     ```
-     You want `"status":"answered","answer":"4"`. Anything else → fix the key/model first.
-   - Without a key: only direct facts (email, phone, name, notice period, CTC, current
-     company/location, links) can be answered; **every other question stops the
-     questionnaire and the job becomes SKIPPED** (`human-needed: unanswerable-question`).
-     That is still a valid test of the abandonment behaviour.
-3. **Optional but recommended:** fill in Setup (`npm run app` → Setup): review the
-   profile, and fill "What a resume usually doesn't say" (notice period, CTC, total
-   experience). Otherwise answers come from `.env`.
+2. **A working Gemini key is required.** TEST (and LIVE) refuse to start without one. Add
+   `GEMINI_KEY=…` (and optionally `GEMINI_MODEL=…`) to `.env`, then check it:
+   ```bash
+   node answer-engine.js --check
+   ```
+   You want `OK — <model> responded`.
+3. **Fill in Setup** (`npm run app` → Setup): load and review your resume profile, and the
+   application facts (notice period, CTC, date of birth, gender, work authorization, current
+   location; relocation and work mode under Job preferences). Each field shows whether its
+   value comes from Setup or falls back to `.env`.
 4. Run the offline checks once:
    ```bash
    node --test

@@ -43,4 +43,15 @@ function mayClick(policy, id) {
 const BENIGN = /Target page, context or browser has been closed|Target closed|Execution context was destroyed|frame was detached|Navigation failed because page was closed|cdpSession\.send|Session closed|browser has disconnected/i;
 const isBenignRace = (e) => BENIGN.test(String((e && (e.stack || e.message)) || e));
 
-module.exports = { parseMode, mayClick, isBenignRace };
+/**
+ * TEST and LIVE may only start when the AI check passed (a real Apply click can lead to
+ * a questionnaire; without working AI every such job would fail). DRY never clicks, so
+ * it may run without a key. `check` is the result of answer-engine checkModel().
+ */
+function aiPreflight(mode, check) {
+  if (mode === 'DRY') return { ok: true };
+  if (check && check.ok === true) return { ok: true };
+  return { ok: false, reason: `${mode} needs working AI answers — ${(check && check.detail) || 'check not run'}. Fix .env, then run: node answer-engine.js --check` };
+}
+
+module.exports = { parseMode, mayClick, isBenignRace, aiPreflight };

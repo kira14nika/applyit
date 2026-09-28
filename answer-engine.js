@@ -130,7 +130,10 @@ async function askJson(prompt, { apiKey, model = DEFAULT_MODEL, fetchImpl = glob
 
 /** One question to Gemini. Never throws; errors come back as unknown/ai-error. */
 async function askGemini(q, facts, opts = {}) {
-  if (!opts.apiKey) return { status: 'unknown', category: 'unanswerable-question', missing: 'AI answering is not configured (GEMINI_KEY is empty)' };
+  // A missing key is a configuration problem, not a question a human must answer: it
+  // is ai-error (→ FAILED, retryable), never SKIPPED. TEST/LIVE refuse to start without
+  // a working key anyway (checkModel + safety.aiPreflight).
+  if (!opts.apiKey) return { status: 'unknown', category: 'ai-error', missing: 'GEMINI_KEY is empty' };
   const res = await askJson(buildPrompt(q, facts), opts);
   if (!res.ok) return { status: 'unknown', category: 'ai-error', missing: res.error };
   return validate(res.json, q);
@@ -169,16 +172,26 @@ async function answer(q, { facts = {}, apiKey = '', model = DEFAULT_MODEL, fetch
   return askGemini(req, relevantFacts(facts, question), { apiKey, model, fetchImpl });
 }
 
-module.exports = { DEFAULT_MODEL, buildFacts, relevantFacts, factLookup, validate, askJson, askGemini, answer, buildPrompt };
+/**
+ * Does the configured key + model actually answer? The single check used by
+ * `node answer-engine.js --check`, the runner before TEST/LIVE, and the app.
+ */
+async function checkModel({ apiKey, model = DEFAULT_MODEL, fetchImpl } = {}) {
+  if (!apiKey) return { ok: false, detail: 'GEMINI_KEY is empty in .env' };
+  const r = await askJson('Connectivity check. Reply with exactly this JSON and nothing else: {"ok":true}',
+    { apiKey, model, fetchImpl, timeoutMs: 20000 });
+  if (!r.ok) return { ok: false, detail: `${model}: ${r.error}` };
+  return r.json && r.json.ok === true ? { ok: true, detail: `${model} responded` }
+    : { ok: false, detail: `${model} responded, but not with the expected JSON` };
+}
+
+module.exports = { DEFAULT_MODEL, buildFacts, relevantFacts, factLookup, validate, askJson, askGemini, answer, buildPrompt, checkModel };
 
 // node answer-engine.js --check : one tiny real call to prove the key + model respond
 if (require.main === module && process.argv.includes('--check')) {
   const { geminiKey, geminiModel } = require('./config');
-  const model = geminiModel || DEFAULT_MODEL;
-  answer({ question: 'What is 2 + 2? (This is a connectivity check; answer from JOB.)', numeric: true, job: { note: '2 + 2 = 4' } },
-    { facts: {}, apiKey: geminiKey, model })
-    .then((r) => {
-      console.log(`model ${model}:`, JSON.stringify(r));
-      process.exit(r.category === 'ai-error' || (!geminiKey) ? 1 : 0);
-    });
+  checkModel({ apiKey: geminiKey, model: geminiModel || DEFAULT_MODEL }).then((r) => {
+    console.log(`${r.ok ? 'OK' : 'FAILED'} — ${r.detail}`);
+    process.exit(r.ok ? 0 : 1);
+  });
 }

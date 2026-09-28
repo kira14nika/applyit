@@ -4,7 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { parseMode, mayClick, isBenignRace } = require('./safety');
+const { parseMode, mayClick, isBenignRace, aiPreflight } = require('./safety');
 const D = require('./naukri-deferred');
 
 const URL1 = 'https://www.naukri.com/job-listings-data-analyst-acme-pune-2-to-5-years-111122223333?src=x';
@@ -58,6 +58,28 @@ test('the page script asks the click gate before its click sequence', () => {
   const click = src.indexOf("applyBtn.dispatchEvent(new MouseEvent('click'");
   assert.ok(gate > 0 && click > 0 && gate < click, 'gate must come before the Apply click');
   assert.ok(/if \(!allowed\) \{ log\(.*\); return 'denied'; \}/.test(src), 'denied must return without clicking');
+});
+
+test('AI preflight: DRY runs without a key; TEST and LIVE refuse unless the check passed', () => {
+  const failed = { ok: false, detail: 'GEMINI_KEY is empty in .env' };
+  assert.strictEqual(aiPreflight('DRY', failed).ok, true);
+  assert.strictEqual(aiPreflight('DRY', undefined).ok, true);
+  for (const mode of ['TEST', 'LIVE']) {
+    assert.strictEqual(aiPreflight(mode, failed).ok, false);
+    assert.match(aiPreflight(mode, failed).reason, /GEMINI_KEY is empty.*answer-engine\.js --check/);
+    assert.strictEqual(aiPreflight(mode, undefined).ok, false, 'no check = refuse');
+    assert.strictEqual(aiPreflight(mode, { ok: true, detail: 'm responded' }).ok, true);
+  }
+});
+
+test('runner: the AI preflight runs before the LIVE prompt and before Chrome launches', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'auto-apply-runner.js'), 'utf8');
+  const body = src.slice(src.indexOf('(async () => {'));
+  const pre = body.indexOf('aiPreflight(MODE, check)');
+  assert.ok(pre > 0, 'preflight present');
+  assert.ok(pre < body.indexOf("rl.question('Type LIVE"), 'before the LIVE prompt');
+  assert.ok(pre < body.indexOf('await launch()'), 'before launching Chrome');
+  assert.ok(/if \(!pf\.ok\) \{ log\(`Refusing \$\{MODE\}: \$\{pf\.reason\}`\); process\.exit\(1\); \}/.test(body), 'refusal exits');
 });
 
 test('deferred list: parks once, survives reload, never touches the ledger format', () => {

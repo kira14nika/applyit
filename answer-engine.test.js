@@ -91,11 +91,21 @@ test('API errors → unknown/ai-error, never a fallback answer', async () => {
   assert.ok(!('answer' in http) && !('answer' in thrown) && !('answer' in junk));
 });
 
-test('no API key → unknown (needs a human), no request made', async () => {
+test('no API key → ai-error (retryable FAILED), never a human-needed SKIPPED; no request made', async () => {
   const calls = [];
   const r = await ask({ question: 'Describe a project' }, geminiReturns({}, calls), '');
-  assert.deepStrictEqual([r.status, r.category], ['unknown', 'unanswerable-question']);
+  assert.deepStrictEqual([r.status, r.category], ['unknown', 'ai-error']);
   assert.strictEqual(calls.length, 0);
+});
+
+test('checkModel: ok only when the model returns the expected JSON', async () => {
+  assert.deepStrictEqual((await E.checkModel({ apiKey: '' })).ok, false);
+  assert.match((await E.checkModel({ apiKey: '' })).detail, /GEMINI_KEY is empty/);
+  assert.strictEqual((await E.checkModel({ apiKey: 'k', model: 'm', fetchImpl: geminiReturns({ ok: true }) })).ok, true);
+  assert.strictEqual((await E.checkModel({ apiKey: 'k', model: 'm', fetchImpl: geminiReturns({ ok: 'yes' }) })).ok, false);
+  const bad = await E.checkModel({ apiKey: 'bad', model: 'm', fetchImpl: async () => ({ ok: false, status: 400, json: async () => ({ error: { message: 'API key not valid' } }) }) });
+  assert.strictEqual(bad.ok, false);
+  assert.match(bad.detail, /400.*API key not valid/);
 });
 
 test('the page script holds no answers, no CV and no key', () => {

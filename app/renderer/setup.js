@@ -20,8 +20,20 @@
   const text = (id, value = '', ph = '') => h('input', { id, value, placeholder: ph });
   const area = (id, value = '', ph = '', rows = 3) => { const a = h('textarea', { id, placeholder: ph, rows: String(rows) }); a.value = value; return a; };
 
+  let setupData = { appFacts: [], factSources: [] };
+  /** "(empty → using .env: 30 days)" etc., from the last saved state. */
+  function sourceHint(key) {
+    const s = setupData.factSources.find((x) => x.key === key);
+    if (!s) return '';
+    if (s.source === 'setup') return 'saved in Setup';
+    if (s.source === 'resume') return `empty → using your resume: ${s.value}`;
+    if (s.source === 'env') return `empty → using .env: ${s.value}`;
+    return key === 'relocation' || key === 'workModes' ? 'not set — questions about this will need you (no .env fallback)'
+      : 'not set anywhere — questions about this will need you';
+  }
   function profileForm(p) {
     const u = p.userProvided || {};
+    const factRow = (f) => row(f.label, h('div', {}, text(`u-${f.key}`, u[f.key] || ''), h('div', { class: 'note', 'data-hint': f.key, text: sourceHint(f.key) })));
     return h('div', {},
       row('Name', text('p-name', p.name)), row('Email', text('p-email', p.email)), row('Phone', text('p-phone', p.phone)),
       row('Location', text('p-location', p.location)), row('Headline', text('p-headline', p.headline)),
@@ -32,12 +44,10 @@
       row('Education', area('p-education', (p.education || []).map((e) => [e.degree, e.institution, e.year].join(' | ')).join('\n'), 'Degree | Institution | Year', 3)),
       row('Certifications', area('p-certs', (p.certifications || []).join('\n'), 'one per line')),
       row('Projects', area('p-projects', (p.projects || []).map((x) => [x.name, x.description].join(' | ')).join('\n'), 'Name | Description', 3)),
-      h('h3', { class: 'section-title', text: 'What a resume usually doesn\'t say (used to answer questions)' }),
-      row('Notice period', text('u-notice', u.noticePeriod, 'e.g. 30 days')),
-      row('Current CTC (lakhs/yr)', text('u-cctc', u.currentCTC, 'e.g. 6')),
-      row('Expected CTC (lakhs/yr)', text('u-ectc', u.expectedCTC, 'e.g. 8')),
-      row('Total experience (years)', text('u-exp', u.totalExperienceYears, 'e.g. 3')),
-      row('Work authorization', text('u-auth', u.workAuthorization, 'e.g. Indian citizen')),
+      h('h3', { class: 'section-title', text: 'Application facts (not in a resume — used to answer questions)' }),
+      h('p', { class: 'note', text: 'Leave a field empty to fall back to the value in .env (shown under each field). Relocation and remote/hybrid/on-site are set under Job preferences below.' }),
+      setupData.appFacts.map(factRow),
+      row('Total experience (years)', text('u-totalExperienceYears', u.totalExperienceYears, 'e.g. 3')),
       h('button', { class: 'primary', text: 'Save profile', onclick: saveProfile }), h('span', { id: 'p-status', class: 'muted', style: 'margin-left:10px' }));
   }
 
@@ -50,14 +60,17 @@
       education: lines($('p-education').value).map((l) => { const [degree, institution, year] = cells(l, 3); return { degree, institution, year }; }),
       certifications: lines($('p-certs').value),
       projects: lines($('p-projects').value).map((l) => { const [name, ...d] = l.split('|'); return { name: name.trim(), description: d.join('|').trim() }; }),
-      userProvided: { noticePeriod: $('u-notice').value, currentCTC: $('u-cctc').value, expectedCTC: $('u-ectc').value,
-        totalExperienceYears: $('u-exp').value, workAuthorization: $('u-auth').value },
+      userProvided: {
+        ...Object.fromEntries(setupData.appFacts.map((f) => [f.key, $(`u-${f.key}`).value])),
+        totalExperienceYears: $('u-totalExperienceYears').value,
+      },
     };
   }
   async function saveProfile() {
     const r = await S.saveProfile(readProfile());
     draft = r.profile;
     $('p-status').textContent = r.ok ? `Saved ${new Date(r.profile.savedAt).toLocaleTimeString()} — answers now come from this profile.` : 'Save failed';
+    if (r.ok) refreshHints();
   }
 
   function prefsForm(p, max) {
@@ -67,8 +80,9 @@
     return h('div', {},
       row('Job titles / search keywords', area('s-titles', (p.titles || []).join('\n'), 'one per line, e.g. Data Analyst', 3)),
       row('Preferred locations', area('s-locs', (p.locations || []).join('\n'), 'one per line; leave empty for any location', 2)),
-      row('Work mode', h('div', {}, chk('s-remote', 'Remote', modes.includes('remote')), chk('s-hybrid', 'Hybrid', modes.includes('hybrid')), chk('s-onsite', 'On-site', modes.includes('on-site')))),
-      row('Willing to relocate', rel),
+      row('Work mode', h('div', {}, chk('s-remote', 'Remote', modes.includes('remote')), chk('s-hybrid', 'Hybrid', modes.includes('hybrid')), chk('s-onsite', 'On-site', modes.includes('on-site')),
+        h('div', { class: 'note', 'data-hint': 'workModes', text: sourceHint('workModes') }))),
+      row('Willing to relocate', h('div', {}, rel, h('div', { class: 'note', 'data-hint': 'relocation', text: sourceHint('relocation') }))),
       row('Salary range (lakhs/yr)', h('div', {}, text('s-salmin', p.salary?.min ?? '', 'min'), text('s-salmax', p.salary?.max ?? '', 'max'))),
       row('Experience range (years)', h('div', {}, text('s-expmin', p.experience?.min ?? '', 'min — also used as ?experience= in searches'), text('s-expmax', p.experience?.max ?? '', 'max'))),
       row('Title must include (any)', area('s-incl', (p.includeKeywords || []).join('\n'), 'extra title words, one per line', 2)),
@@ -101,11 +115,20 @@
     const r = await S.savePrefs(readPrefs());
     $('s-status').textContent = `Saved — limits ${r.prefs.limits.perRun}/run, ${r.prefs.limits.daily}/day; ${r.searches.length} searches.`;
     $('s-perrun').value = r.prefs.limits.perRun; $('s-daily').value = r.prefs.limits.daily;
+    refreshHints();
     preview();
+  }
+
+  /** Re-read where each fact comes from without re-rendering (keeps unsaved edits). */
+  async function refreshHints() {
+    const d = await S.load();
+    setupData.factSources = d.factSources;
+    document.querySelectorAll('[data-hint]').forEach((n) => { n.textContent = sourceHint(n.dataset.hint); });
   }
 
   async function load() {
     const d = await S.load();
+    setupData = d;
     draft = d.profile || { userProvided: {} };
     const root = $('setup-root'); root.textContent = '';
     const status = h('div', { id: 'r-status', class: 'muted' });
@@ -126,7 +149,7 @@
       status, dropped,
       h('h3', { class: 'section-title', text: '2 · Profile — review and edit' }),
       d.profile ? h('p', { class: 'muted', text: `Saved ${new Date(d.profile.savedAt).toLocaleString()}${d.profile.resumeFile ? ' from ' + d.profile.resumeFile : ''}` })
-        : h('p', { class: 'muted', text: 'No profile yet — answers currently come from the .env file.' }),
+        : h('p', { class: 'muted', text: 'No profile yet — only the application facts below (Setup or .env) can be used to answer questions.' }),
       Object.assign(profileForm(draft), { id: 'profile-form' }),
       h('h3', { class: 'section-title', text: '3 · Job preferences' }),
       prefsForm(d.prefs || { limits: {} }, d.max));

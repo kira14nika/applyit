@@ -124,33 +124,72 @@ function save(profile, file = PROFILE) {
 }
 
 /**
- * Facts for the answer engine. profile.json (resume-derived + user-provided) wins;
- * the .env CV fills only what the profile lacks; preferences add explicit choices
- * (relocation, work modes, locations). Empty values never become facts.
+ * Application facts a resume usually doesn't contain. Entered in Setup (stored in
+ * profile.json `userProvided`); for these fields ONLY, the .env value is used when Setup
+ * leaves them empty. `env` names the config.js CV field; `fact` is the answer-engine key.
+ * Relocation and work modes come from preferences.json and have no .env fallback — the
+ * .env "relocate"/"remoteOk" values are sentences config.js invents, not user data.
  */
-function factsFromProfile(profile, cvFacts = {}, prefs = null) {
-  const f = { ...cvFacts };
+const DEFAULT_WORK_AUTH = 'Authorized to work in my country of residence.'; // config.js default, not user data
+const APP_FACTS = [
+  { key: 'noticePeriod', label: 'Notice period', env: 'noticePeriod', fact: 'noticePeriod' },
+  { key: 'currentCTC', label: 'Current CTC (lakhs/yr)', env: 'currentCTC', fact: 'currentCTC_lakhs' },
+  { key: 'expectedCTC', label: 'Expected CTC (lakhs/yr)', env: 'expectedCTC', fact: 'expectedCTC_lakhs' },
+  { key: 'dateOfBirth', label: 'Date of birth', env: 'dob', fact: 'dateOfBirth' },
+  { key: 'gender', label: 'Gender', env: 'gender', fact: 'gender' },
+  { key: 'workAuthorization', label: 'Work authorization', env: 'workAuth', fact: 'workAuthorization' },
+  { key: 'currentLocation', label: 'Current location', env: 'location', fact: 'location' },
+];
+
+/**
+ * Resolve the application facts: Setup value → (current location only) resume location
+ * → .env. Returns the facts plus where each value came from, for the Setup page.
+ */
+function applicationFacts(profile, prefs, cv = {}) {
+  const u = (profile && profile.userProvided) || {};
+  const facts = {};
+  const sources = [];
+  for (const f of APP_FACTS) {
+    const envRaw = String(cv[f.env] || '').trim();
+    const envValue = f.env === 'workAuth' && envRaw === DEFAULT_WORK_AUTH ? '' : envRaw;
+    let value = String(u[f.key] || '').trim();
+    let source = value ? 'setup' : null;
+    if (!value && f.key === 'currentLocation' && profile && profile.location) { value = profile.location; source = 'resume'; }
+    if (!value && envValue) { value = envValue; source = 'env'; }
+    if (value) facts[f.fact] = value;
+    sources.push({ key: f.key, label: f.label, value, source, envValue });
+  }
+  const reloc = prefs && prefs.relocation === 'yes' ? 'Yes' : prefs && prefs.relocation === 'no' ? 'No' : '';
+  if (reloc) facts.willingToRelocate = reloc;
+  sources.push({ key: 'relocation', label: 'Willing to relocate', value: reloc, source: reloc ? 'setup' : null, envValue: '' });
+  const modes = prefs ? (prefs.workModes || []).join(', ') : '';
+  if (modes) facts.preferredWorkModes = modes;
+  sources.push({ key: 'workModes', label: 'Remote / hybrid / on-site', value: modes, source: modes ? 'setup' : null, envValue: '' });
+  return { facts, sources };
+}
+
+/**
+ * Facts for the answer engine = resume profile (Setup) + application facts. Nothing else
+ * from .env is used (no skills/role/highlights from .env). Empty values never become facts.
+ */
+function factsFor(profile, prefs = null, cv = {}) {
+  const f = {};
   if (profile) {
     const u = profile.userProvided || {};
     const current = (profile.jobs || []).find((j) => /present|current|now|till date/i.test(j.end || '')) || null;
-    Object.assign(f, strip({
-      name: profile.name, email: profile.email, phone: profile.phone, location: profile.location,
+    Object.assign(f, {
+      name: profile.name, email: profile.email, phone: profile.phone,
       currentRole: current ? current.title : '', currentCompany: current ? current.employer : '',
       skills: [...(profile.skills || []), ...(profile.tools || [])].join(', '),
       languages: (profile.languages || []).join(', '),
       employmentHistory: (profile.jobs || []).map((j) => `${j.title} at ${j.employer} (${j.start || '?'} – ${j.end || '?'})`),
       education: (profile.education || []).map((e) => [e.degree, e.institution, e.year].filter(Boolean).join(', ')),
       certifications: profile.certifications, projects: (profile.projects || []).map((p) => p.description ? `${p.name}: ${p.description}` : p.name),
-      noticePeriod: u.noticePeriod, currentCTC_lakhs: u.currentCTC, expectedCTC_lakhs: u.expectedCTC,
-      totalExperience: u.totalExperienceYears, workAuthorization: u.workAuthorization,
-    }));
+      totalExperience: u.totalExperienceYears,
+    });
   }
-  if (prefs) {
-    Object.assign(f, strip({
-      willingToRelocate: prefs.relocation === 'yes' ? 'Yes' : prefs.relocation === 'no' ? 'No' : '',
-      preferredWorkModes: (prefs.workModes || []).join(', '), preferredLocations: (prefs.locations || []).join(', '),
-    }));
-  }
+  Object.assign(f, applicationFacts(profile, prefs, cv).facts);
+  if (prefs && (prefs.locations || []).length) f.preferredLocations = prefs.locations.join(', ');
   return strip(f);
 }
 function strip(o) {
@@ -158,4 +197,4 @@ function strip(o) {
   return o;
 }
 
-module.exports = { PROFILE, extractPdfText, grounded, groundProfile, buildProfile, load, save, factsFromProfile };
+module.exports = { PROFILE, APP_FACTS, extractPdfText, grounded, groundProfile, buildProfile, load, save, applicationFacts, factsFor };

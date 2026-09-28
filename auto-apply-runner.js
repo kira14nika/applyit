@@ -29,7 +29,7 @@ try {
   ({ chromium } = require('playwright-core'));
 }
 
-const { parseMode, mayClick, isBenignRace } = require('./safety');
+const { parseMode, mayClick, isBenignRace, aiPreflight } = require('./safety');
 
 // Page reloads (naukri clicking "Next") race the stealth plugin's CDP session and throw
 // async rejections outside any await. ONLY those known races are ignored; anything
@@ -188,6 +188,10 @@ const bumpDayCount = () => { dayState.count++; try { fs.writeFileSync(STATE_FILE
 // a TEST run can never want more than its allow-list
 const TARGET = run ? (MODE === 'TEST' ? Math.min(run.target, POLICY.allow.size) : run.target)
   : Math.min(site.perRun || DAILY_CAP, DAILY_CAP - dayState.count);
+// Jobs whose questionnaire already FAILED twice: the next attempt is recorded SKIPPED
+// ("human-needed: repeated-questionnaire-failure") at the click gate instead of retried.
+const LEDGER_MOD = require('./naukri-ledger');
+const QCAP = run ? LEDGER_MOD.repeatedQuestionnaireFailures(LEDGER_MOD.load()) : new Set();
 // Company-site jobs parked outside the ledger (naukri-deferred.js), excluded from later runs.
 const deferred = run ? require('./naukri-deferred') : null;
 const deferredIds = deferred ? deferred.ids() : new Set();
@@ -282,6 +286,13 @@ function buildInjection(max = TARGET) {
 }
 
 (async () => {
+  // TEST/LIVE: refuse unless the AI check passes — before any prompt and before Chrome starts.
+  if (site.ledger && MODE !== 'DRY' && !LOGIN_MODE) {
+    const check = await answerEngine.checkModel({ apiKey: geminiKey, model: geminiModel || answerEngine.DEFAULT_MODEL });
+    const pf = aiPreflight(MODE, check);
+    if (!pf.ok) { log(`Refusing ${MODE}: ${pf.reason}`); process.exit(1); }
+    log(`AI check passed: ${check.detail}`);
+  }
   // LIVE needs an explicit second yes: --confirm-live, or typing LIVE at an interactive prompt.
   if (MODE === 'LIVE' && !LOGIN_MODE && !POLICY.confirmed) {
     if (!process.stdin.isTTY) {
@@ -376,7 +387,9 @@ function buildInjection(max = TARGET) {
     (EXTERNAL_ON ? '' : ' — company-site applies paused until they are ledger-recorded'));
   if (run && deferredIds.size) log(`Deferred company-site jobs excluded: ${deferredIds.size}`);
   if (run) log(`Setup: ${PREFS ? `preferences.json (${site.searches.length} searches, limits ${site.perRun}/run ${site.dailyCap}/day)` : 'no preferences.json — built-in searches'}; ` +
-    `answers from ${PROFILE ? 'profile.json' : '.env CV'}`);
+    `answers from ${PROFILE ? 'profile.json' : 'no profile yet (Setup)'} + application facts` +
+    (() => { const env = require('./resume-profile').applicationFacts(PROFILE, PREFS, CV).sources.filter((s) => s.source === 'env').map((s) => s.label);
+      return env.length ? ` (from .env: ${env.join(', ')})` : ''; })());
   log(`Starting. mode=${MODE === 'DRY' ? 'DRY RUN' : MODE} target=${TARGET} applications, max ${MAX_RUNTIME_MS / 60000} min`);
   emit('starting', { counts: { run: 0, target: TARGET, today: run ? run.today : dayState.count, dailyCap: DAILY_CAP },
     text: `${MODE} run, target ${TARGET}` });
@@ -595,7 +608,10 @@ function buildInjection(max = TARGET) {
     try {
       if (!LIVE) { // dry run: nothing is written, simulated applies still pace the run
         run.excluded.add(rid); // in memory: don't re-walk it this run
-        if (r.status === 'APPLIED' && r.reason !== 'already-applied') {
+        if (r.status === 'APPLIED' && r.reason !== 'already-applied' && QCAP.has(rid)) {
+          log(`  (dry run — would record SKIPPED: ${LEDGER_MOD.REPEATED_QUESTIONNAIRE_FAILURE})`);
+          finishJob(rid, { status: 'DRY', reason: `would record SKIPPED: ${LEDGER_MOD.REPEATED_QUESTIONNAIRE_FAILURE}` }, null);
+        } else if (r.status === 'APPLIED' && r.reason !== 'already-applied') {
           submitted++;
           log(`==> ${submitted}/${TARGET} this run (dry run — not recorded)`);
           finishJob(rid, { status: 'DRY', reason: 'would apply — not submitted' }, 'would-apply');
@@ -631,7 +647,8 @@ function buildInjection(max = TARGET) {
             finishJob(rid, { status: 'APPLIED', reason: 'already-applied', verification: v, counted: false }, 'already-applied');
           }
         } else {
-          const rec = run.record({ ...r, status: 'FAILED', reason: `unverified (${v}) after: ${r.reason || ''}` });
+          const rec = run.record({ ...r, status: 'FAILED',
+            reason: `${r.questionnaire ? LEDGER_MOD.QUESTIONNAIRE_STAGE + ' ' : ''}unverified (${v}) after: ${r.reason || ''}` });
           log(`  ❌ not verified (${v}) — recorded FAILED, not counted`);
           finishJob(rid, { status: 'FAILED', reason: rec.reason, verification: v }, 'failed');
         }
@@ -662,9 +679,8 @@ function buildInjection(max = TARGET) {
    * window.__aaAnswer({question, options, numeric, job}) — the page's only source of
    * answers. Facts come from the user's own data, then Gemini; never a fallback.
    */
-  // profile.json (from Setup) when it exists, otherwise the .env CV — never both mixed
-  const FACTS = PROFILE ? require('./resume-profile').factsFromProfile(PROFILE, {}, PREFS)
-    : require('./resume-profile').factsFromProfile(null, answerEngine.buildFacts(CV), PREFS);
+  // resume profile (Setup) + application facts; .env only fills empty application facts
+  const FACTS = require('./resume-profile').factsFor(PROFILE, PREFS, CV);
   async function onAnswer(source, q) {
     const jid = String(q?.job?.id || '');
     tracker?.event(jid, 'generating-answer', { question: q?.question || '', options: q?.options || [] });
@@ -678,7 +694,26 @@ function buildInjection(max = TARGET) {
 
   /** window.__aaMayClick(jobId): the page asks before every real Apply click. */
   function onMayClick(source, id) {
-    const ok = mayClick(POLICY, String(id || ''));
+    id = String(id || '');
+    // A job whose questionnaire FAILED twice before: record SKIPPED now, don't click again.
+    // (Only reached where a click would otherwise be allowed; TEST non-allow-listed jobs
+    // are denied below without any record, as before.)
+    if (run && QCAP.has(id) && mayClick(POLICY, id)) {
+      const d = tracker?.details(id) || {};
+      try {
+        const n = LEDGER_MOD.questionnaireFailures(LEDGER_MOD.load(), id);
+        const rec = run.record({ jobId: id, url: d.url, title: d.title, company: d.company, status: 'SKIPPED', reason: LEDGER_MOD.REPEATED_QUESTIONNAIRE_FAILURE });
+        log(`  ⏭ SKIPPED — ${rec.reason} (questionnaire FAILED ${n}× before; not clicking again)`);
+        finishJob(id, { status: 'SKIPPED', reason: rec.reason, clicked: false,
+          intervention: { category: 'repeated-questionnaire-failure', stage: 'before the Apply click', question: '', options: [],
+            missing: `the questionnaire failed ${n} times in earlier runs` } }, 'skipped');
+      } catch (e) { log('ledger error (nothing clicked, nothing counted): ' + firstLine(e)); }
+      QCAP.delete(id);
+      run.excluded.add(id);
+      markTested(id);
+      return false;
+    }
+    const ok = mayClick(POLICY, id);
     log(`  🔒 click gate: ${id} → ${ok ? 'ALLOW' : 'DENY'} (${MODE})`);
     if (!ok && run) {
       run.excluded.add(String(id)); // not again this run

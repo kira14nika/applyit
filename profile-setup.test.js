@@ -77,19 +77,53 @@ test('no key or an AI error → only literal email/phone, nothing guessed', asyn
   }
 });
 
-test('profile.json round trip; facts come from the profile and skip empty values', () => {
+const ENV_CV = { // what config.js builds from .env
+  name: 'Env Name', email: 'env@example.com', skills: 'Kubernetes, Go', currentRole: 'Env Role', highlights: ['env highlight'],
+  noticePeriod: '60 days', currentCTC: '5', expectedCTC: '7', dob: '01/01/1999', gender: 'Female',
+  workAuth: 'Authorized to work in my country of residence.', // config default, not user data
+  location: 'Env City', relocate: 'Yes, I am open to relocation.', remoteOk: 'Yes, I am fully set up for remote work',
+};
+
+test('profile.json round trip; resume facts + Setup application facts', () => {
   const f = path.join(tmp(), 'profile.json');
-  R.save({ name: 'Test Candidate', skills: ['SQL'], tools: ['Excel'], jobs: [{ title: 'Data Analyst', employer: 'Acme', start: '2022', end: 'Present' }],
-    userProvided: { noticePeriod: '30 days', currentCTC: '', expectedCTC: '8' } }, f);
-  const p = R.load(f);
-  const facts = R.factsFromProfile(p, {}, P.normalize({ relocation: 'yes', workModes: ['remote'] }));
+  R.save({ name: 'Test Candidate', skills: ['SQL'], tools: ['Excel'], location: 'Pune',
+    jobs: [{ title: 'Data Analyst', employer: 'Acme', start: '2022', end: 'Present' }],
+    userProvided: { noticePeriod: '30 days', currentCTC: '', expectedCTC: '8', dateOfBirth: '02/02/2000', gender: 'Male',
+      workAuthorization: 'Indian citizen', currentLocation: 'Mumbai' } }, f);
+  const facts = R.factsFor(R.load(f), P.normalize({ relocation: 'yes', workModes: ['remote', 'hybrid'] }), ENV_CV);
   assert.strictEqual(facts.currentRole, 'Data Analyst');
-  assert.strictEqual(facts.currentCompany, 'Acme');
-  assert.strictEqual(facts.skills, 'SQL, Excel');
-  assert.strictEqual(facts.noticePeriod, '30 days');
-  assert.ok(!('currentCTC_lakhs' in facts), 'empty value is not a fact');
+  assert.strictEqual(facts.skills, 'SQL, Excel', 'skills from the resume profile only — never .env');
+  assert.strictEqual(facts.name, 'Test Candidate');
+  assert.strictEqual(facts.noticePeriod, '30 days', 'Setup wins over .env');
+  assert.strictEqual(facts.dateOfBirth, '02/02/2000');
+  assert.strictEqual(facts.gender, 'Male');
+  assert.strictEqual(facts.workAuthorization, 'Indian citizen');
+  assert.strictEqual(facts.location, 'Mumbai', 'current location from Setup beats the resume');
+  assert.strictEqual(facts.currentCTC_lakhs, '5', 'empty in Setup → .env fallback');
   assert.strictEqual(facts.willingToRelocate, 'Yes');
-  assert.ok(!('email' in facts), 'nothing invented for missing fields');
+  assert.strictEqual(facts.preferredWorkModes, 'remote, hybrid');
+});
+
+test('.env is a fallback ONLY for the application facts, and sources are reported', () => {
+  const { facts, sources } = R.applicationFacts({ location: 'Pune', userProvided: { gender: 'Male' } }, P.normalize({}), ENV_CV);
+  const src = Object.fromEntries(sources.map((s) => [s.key, s.source]));
+  assert.deepStrictEqual(src, { noticePeriod: 'env', currentCTC: 'env', expectedCTC: 'env', dateOfBirth: 'env', gender: 'setup',
+    workAuthorization: null, currentLocation: 'resume', relocation: null, workModes: null });
+  assert.ok(!('workAuthorization' in facts), 'the config.js default work-auth sentence is not a fact');
+  assert.ok(!('willingToRelocate' in facts) && !('preferredWorkModes' in facts), 'no fallback to invented .env sentences');
+  const noProfile = R.factsFor(null, null, ENV_CV);
+  assert.ok(!('skills' in noProfile) && !('name' in noProfile) && !('email' in noProfile) && !('currentRole' in noProfile),
+    'without a profile, .env gives only the application facts');
+  assert.strictEqual(noProfile.noticePeriod, '60 days');
+  assert.strictEqual(noProfile.location, 'Env City');
+});
+
+test('Setup collects every required application fact', () => {
+  const keys = R.APP_FACTS.map((f) => f.key);
+  for (const k of ['noticePeriod', 'currentCTC', 'expectedCTC', 'dateOfBirth', 'gender', 'workAuthorization', 'currentLocation']) assert.ok(keys.includes(k), k);
+  const setup = fs.readFileSync(path.join(__dirname, 'app', 'renderer', 'setup.js'), 'utf8');
+  assert.ok(setup.includes('setupData.appFacts.map(factRow)'), 'form fields are generated from APP_FACTS');
+  assert.ok(setup.includes("chk('s-remote'") && setup.includes("h('select', { id: 's-reloc' }"), 'relocation + work modes in preferences');
 });
 
 test('preferences: limits can be lowered, never raised; searches use only slug + experience', () => {

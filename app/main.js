@@ -36,11 +36,23 @@ const send = (channel, payload) => { if (win && !win.isDestroyed()) win.webConte
 const files = () => ({ ledger: ledger.load(), history: history.load(), deferred: deferred.load() });
 
 const { runnerArgs } = require('./run-args');
+const { aiPreflight } = require('../safety');
 
-function startRun(opts) {
+async function startRun(opts, { forcedCheck } = {}) {
   if (child) return { ok: false, error: 'a run is already in progress' };
   let spec;
   try { spec = runnerArgs(opts); } catch (e) { return { ok: false, error: e.message }; }
+  // same AI check as the runner (which repeats it): TEST/LIVE never start without working AI.
+  // forcedCheck exists only so the self-test can prove the refusal without any real key.
+  if (spec.mode !== 'DRY') {
+    const { geminiKey, geminiModel } = cfg();
+    const engine = require('../answer-engine');
+    const check = forcedCheck || await engine.checkModel({ apiKey: geminiKey, model: geminiModel || engine.DEFAULT_MODEL });
+    const pf = aiPreflight(spec.mode, check);
+    if (!pf.ok) return { ok: false, error: pf.reason };
+    if (forcedCheck) return { ok: false, error: 'self-test: forced check passed — not starting' }; // never fork from a test
+  }
+  if (child) return { ok: false, error: 'a run is already in progress' };
   lastMode = spec.mode;
   recentEvents.length = 0;
   lastSnapshot = null;
@@ -108,15 +120,24 @@ function sanitizeProfile(p = {}) {
     jobs: (Array.isArray(p.jobs) ? p.jobs : []).map((j) => ({ title: str(j.title), employer: str(j.employer), start: str(j.start), end: str(j.end) })).filter((j) => j.title || j.employer),
     education: (Array.isArray(p.education) ? p.education : []).map((e) => ({ degree: str(e.degree), institution: str(e.institution), year: str(e.year) })).filter((e) => e.degree || e.institution),
     projects: (Array.isArray(p.projects) ? p.projects : []).map((x) => ({ name: str(x.name), description: str(x.description) })).filter((x) => x.name),
-    userProvided: { noticePeriod: str(u.noticePeriod), currentCTC: str(u.currentCTC), expectedCTC: str(u.expectedCTC),
-      totalExperienceYears: str(u.totalExperienceYears), workAuthorization: str(u.workAuthorization) },
+    userProvided: {
+      ...Object.fromEntries(resumeProfile.APP_FACTS.map((f) => [f.key, str(u[f.key])])),
+      totalExperienceYears: str(u.totalExperienceYears),
+    },
     resumeFile: str(p.resumeFile), resumeText: typeof p.resumeText === 'string' ? p.resumeText.slice(0, 60000) : '',
   };
 }
-ipcMain.handle('setup:load', () => ({
-  profile: resumeProfile.load(), prefs: preferences.load(), hasKey: !!cfg().geminiKey,
-  model: cfg().geminiModel || require('../answer-engine').DEFAULT_MODEL, max: preferences.MAX,
-}));
+ipcMain.handle('setup:load', () => {
+  const profile = resumeProfile.load();
+  const prefs = preferences.load();
+  return {
+    profile, prefs, hasKey: !!cfg().geminiKey,
+    model: cfg().geminiModel || require('../answer-engine').DEFAULT_MODEL, max: preferences.MAX,
+    appFacts: resumeProfile.APP_FACTS.map(({ key, label }) => ({ key, label })),
+    // where each application fact currently comes from (setup / resume / env / none)
+    factSources: resumeProfile.applicationFacts(profile, prefs, cfg().CV).sources,
+  };
+});
 ipcMain.handle('setup:pickResume', async () => {
   const { dialog } = require('electron');
   const r = await dialog.showOpenDialog(win, { title: 'Select your resume (PDF)', properties: ['openFile'], filters: [{ name: 'PDF', extensions: ['pdf'] }] });
@@ -166,9 +187,13 @@ app.on('window-all-closed', () => app.quit());
 // Opens the real window, starts a DRY run through the same IPC the buttons use, then
 // pauses, resumes and stops it, and checks the Running page rendered what happened.
 let st = null;
-function selftestStart() {
+async function selftestStart() {
   st = { step: 'wait-job', seen: [], timer: setTimeout(() => selftestDone(false, 'timeout'), 300000) };
-  const r = startRun({ mode: 'DRY' });
+  // TEST/LIVE must be refused when the AI check fails (forced failure: nothing can start)
+  const t = await startRun({ mode: 'TEST', only: '123456789012' }, { forcedCheck: { ok: false, detail: 'self-test forced failure' } });
+  const l = await startRun({ mode: 'LIVE', confirmText: 'LIVE' }, { forcedCheck: { ok: false, detail: 'self-test forced failure' } });
+  st.refused = !t.ok && !l.ok && /working AI/.test(t.error) && /working AI/.test(l.error) && !child;
+  const r = await startRun({ mode: 'DRY' });
   if (!r.ok) selftestDone(false, r.error);
 }
 function selftestOnEvent(m) {
@@ -200,7 +225,8 @@ async function selftestOnExit(code) {
   const need = ['starting', 'searching', 'checking-job', 'paused', 'resumed', 'stopped'];
   const missing = need.filter((s) => !st.seen.includes(s));
   const ok = code === 0 && !missing.length && /PAUSED/i.test(st.pausedUi || '') && /STOPPED/i.test(ui.state || '') && ui.events > 5
-    && ui.setupLoaded === true && (resumeChars === null || typeof resumeChars === 'number');
+    && ui.setupLoaded === true && (resumeChars === null || typeof resumeChars === 'number') && st.refused === true;
+  ui.testLiveRefusedWithoutAi = st.refused;
   // --capture=<dir>: save a screenshot of each page (needs --show-window to render)
   const cap = (process.argv.find((a) => a.startsWith('--capture=')) || '').slice(10);
   if (cap) {

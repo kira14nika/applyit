@@ -70,6 +70,27 @@ const excludedIds = (records = load()) =>
   new Set(records.filter((r) => r.status === 'APPLIED' || r.status === 'SKIPPED').map((r) => r.jobId));
 
 /**
+ * Questionnaire-stage failures. FAILED stays retryable, but a job whose questionnaire
+ * has FAILED `limit` times is not clicked again: its next attempt is recorded SKIPPED
+ * (human-needed) instead. FAILED reasons from that stage start with QUESTIONNAIRE_STAGE.
+ */
+const QUESTIONNAIRE_STAGE = 'questionnaire-stage:';
+const REPEATED_QUESTIONNAIRE_FAILURE = 'human-needed: repeated-questionnaire-failure';
+const QUESTIONNAIRE_FAILURE_LIMIT = 2;
+function questionnaireFailures(records, id) {
+  return records.filter((r) => r.jobId === id && r.status === 'FAILED' && String(r.reason).startsWith(QUESTIONNAIRE_STAGE)).length;
+}
+/** Job ids whose next attempt must be SKIPPED rather than retried. */
+function repeatedQuestionnaireFailures(records, limit = QUESTIONNAIRE_FAILURE_LIMIT) {
+  const done = excludedIds(records); // already APPLIED/SKIPPED: nothing to cap
+  const out = new Set();
+  for (const r of records) {
+    if (!done.has(r.jobId) && questionnaireFailures(records, r.jobId) >= limit) out.add(r.jobId);
+  }
+  return out;
+}
+
+/**
  * One run's view of the ledger, loaded once at startup. `today` (daily cap) and
  * `submitted` (per-run cap) only move when an APPLIED line has actually been written
  * with count:true. `excluded` = permanent APPLIED/SKIPPED ids plus, in memory only,
@@ -97,4 +118,5 @@ function startRun({ file = LEDGER, now = new Date(), dailyCap = 50, perRun = 10 
   return run;
 }
 
-module.exports = { LEDGER, STATUSES, dayOf, jobId, load, append, todayApplied, excludedIds, startRun };
+module.exports = { LEDGER, STATUSES, dayOf, jobId, load, append, todayApplied, excludedIds, startRun,
+  QUESTIONNAIRE_STAGE, REPEATED_QUESTIONNAIRE_FAILURE, QUESTIONNAIRE_FAILURE_LIMIT, questionnaireFailures, repeatedQuestionnaireFailures };

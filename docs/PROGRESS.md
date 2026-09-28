@@ -142,6 +142,27 @@ Verified by a DRY run: history recorded `match {score 72, good-match, 10 matched
 checking-job → opening-application → ai-matching → would-apply.
 Not verified: the Gemini match path against a real model (no key).
 
+## Follow-up fixes ✅
+
+| Fix | What | Where |
+|---|---|---|
+| 1 | A missing/invalid `GEMINI_KEY` can never produce SKIPPED: no key is now `ai-error` (→ FAILED, retryable). **TEST and LIVE refuse to start** unless `checkModel()` succeeds — the same check as `node answer-engine.js --check`, run by the runner before the LIVE prompt and before Chrome, and by the app before it launches the runner. DRY runs without a key | `answer-engine.js` `checkModel`, `safety.js` `aiPreflight`, runner start, `app/main.js` `startRun` |
+| 2 | Setup collects the application facts a resume doesn't hold: notice period, current CTC, expected CTC, date of birth, gender, work authorization, current location (profile.json `userProvided`); willingness to relocate and remote/hybrid/on-site (preferences.json). Answers use the resume profile + these facts; `.env` fills ONLY these fields when Setup leaves them empty (never skills/role/etc., never config.js's invented relocate/remote sentences or its default work-auth sentence). Setup shows under each field where the value comes from (Setup / resume / `.env: …` / not set) | `resume-profile.js` `APP_FACTS`, `applicationFacts`, `factsFor`; Setup page |
+| 3 | Questionnaire-stage FAILED reasons are tagged `questionnaire-stage:` (AI error in the chatbot, no confirmation after a questionnaire, unverified after a questionnaire). A job with 2 such FAILED records is SKIPPED at the click gate on its next attempt with `human-needed: repeated-questionnaire-failure` — before any click. APPLIED counting and verification unchanged | `naukri-ledger.js` `repeatedQuestionnaireFailures`, page `hadQuestionnaire`, runner `onMayClick` |
+
+Behaviour change to note: without a saved profile, `.env` now supplies only the
+application facts — questions about skills/experience need the Setup profile (or become
+unknown), and the advisory match reports "unknown" until Setup has skills.
+
+Tests (65 total): no key → ai-error; `checkModel` ok / empty key / wrong JSON / HTTP 400;
+`aiPreflight` DRY ok, TEST/LIVE refused; runner source order (preflight before the LIVE
+prompt and before launch); application facts (Setup wins, `.env` fallback only for the
+listed fields, sources reported, defaults/invented sentences ignored, no `.env` skills
+without a profile); questionnaire cap (counts only tagged FAILED, SKIPPED ends the cap,
+counts untouched) and its wiring. App self-test: TEST and LIVE are refused when the AI
+check fails (forced failure — cannot start a run even with a real key), plus the DRY
+pause/resume/stop run.
+
 ## What's left
 See the final report and [CONTROLLED-TEST.md](CONTROLLED-TEST.md). Nothing in this
 build clicked Apply: TEST and LIVE are implemented and unit-tested but have not been run.

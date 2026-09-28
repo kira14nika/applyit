@@ -126,6 +126,43 @@ test('a failed append counts nothing', () => {
   assert.strictEqual(r.today, 0);
 });
 
+test('questionnaire cap: 2 questionnaire-stage FAILED → next attempt SKIPPED; other FAILED don\'t count', () => {
+  const f = tmp();
+  const Q = L.QUESTIONNAIRE_STAGE;
+  L.append({ url: JOB + 'q', status: 'FAILED', reason: `${Q} ai-error: Gemini HTTP 503` }, f);
+  L.append({ url: JOB + 'q', status: 'FAILED', reason: `${Q} unverified (unknown) after: confirmed in page` }, f);
+  L.append({ url: JOB + 'o', status: 'FAILED', reason: `${Q} ai-error: x` }, f);                     // only once
+  L.append({ url: JOB + 'o', status: 'FAILED', reason: 'no Apply button within 30s' }, f);             // not questionnaire stage
+  L.append({ url: JOB + 's', status: 'FAILED', reason: `${Q} ai-error: x` }, f);
+  L.append({ url: JOB + 's', status: 'FAILED', reason: `${Q} ai-error: y` }, f);
+  L.append({ url: JOB + 's', status: 'SKIPPED', reason: L.REPEATED_QUESTIONNAIRE_FAILURE }, f);         // already capped
+  const recs = L.load(f);
+  assert.strictEqual(L.questionnaireFailures(recs, L.jobId(JOB + 'q')), 2);
+  assert.strictEqual(L.questionnaireFailures(recs, L.jobId(JOB + 'o')), 1);
+  assert.deepStrictEqual([...L.repeatedQuestionnaireFailures(recs)], [L.jobId(JOB + 'q')]);
+  assert.strictEqual(L.REPEATED_QUESTIONNAIRE_FAILURE, 'human-needed: repeated-questionnaire-failure');
+  // recording the SKIPPED makes it permanent, and counts stay untouched
+  const r = L.startRun({ file: f, now: new Date() });
+  const before = [r.today, r.submitted];
+  r.record({ url: JOB + 'q', status: 'SKIPPED', reason: L.REPEATED_QUESTIONNAIRE_FAILURE }, { count: true });
+  assert.deepStrictEqual([r.today, r.submitted], before, 'SKIPPED never counts');
+  const after = L.load(f);
+  assert.ok(L.excludedIds(after).has(L.jobId(JOB + 'q')));
+  assert.strictEqual(L.repeatedQuestionnaireFailures(after).size, 0);
+});
+
+test('questionnaire cap is wired: page tags the stage, the click gate records SKIPPED before any click', () => {
+  const page = fs.readFileSync(path.join(__dirname, 'naukri-auto-apply.js'), 'utf8');
+  assert.ok(page.includes("why = `questionnaire-stage: ai-error: ${res.missing}`"));
+  assert.ok(page.includes("why = (hadQuestionnaire ? 'questionnaire-stage: ' : '') + 'no confirmation after clicking Apply'"));
+  assert.ok(page.includes('{ questionnaire: hadQuestionnaire }'));
+  const runner = fs.readFileSync(path.join(__dirname, 'auto-apply-runner.js'), 'utf8');
+  const gate = runner.slice(runner.indexOf('function onMayClick'), runner.indexOf('function onMayClick') + 2000);
+  assert.ok(gate.indexOf('QCAP.has(id)') < gate.indexOf('const ok = mayClick(POLICY, id)'), 'cap checked before a click is allowed');
+  assert.ok(/status: 'SKIPPED', reason: LEDGER_MOD\.REPEATED_QUESTIONNAIRE_FAILURE/.test(gate));
+  assert.ok(/QCAP\.delete\(id\);\s+run\.excluded\.add\(id\);\s+markTested\(id\);\s+return false;/.test(gate), 'and returns false (no click)');
+});
+
 test('load creates a missing ledger; bad status is rejected', () => {
   const f = tmp();
   assert.deepStrictEqual(L.load(f), []);

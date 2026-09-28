@@ -270,6 +270,9 @@
   // ======================= APPLY TO ONE JOB (in popup) =======================
   let why = ''; // reason for the last `return false`, reported to the runner as FAILED
   let intervention = null; // details for the last `return 'skipped'`, reported as SKIPPED
+  // true once this job's questionnaire opened: its FAILED reasons are tagged
+  // "questionnaire-stage:" so the runner can cap repeated questionnaire failures
+  let hadQuestionnaire = false;
   async function applyInPopup(popup, job) {
     popup.location.href = job.href;
     const applyBtn = await waitFor(() => {
@@ -366,10 +369,11 @@
       return 'skipped';
     }
     if (outcome === 'chatbot') {
+      hadQuestionnaire = true;
       const res = await handleChatbot(doc(), job);
       if (res !== true) {
         // a transient AI failure is retryable (FAILED); everything else needs a human (SKIPPED)
-        if (res.category === 'ai-error') { why = `ai-error: ${res.missing}`; return false; }
+        if (res.category === 'ai-error') { why = `questionnaire-stage: ai-error: ${res.missing}`; return false; }
         intervention = res;
         return 'skipped';
       }
@@ -398,7 +402,7 @@
       const btns = d && d.body ? [...d.querySelectorAll('button')].filter(visible)
         .map((b) => b.textContent.trim()).filter(Boolean).slice(0, 8) : [];
       log('  ⚠ could not confirm success — check the popup.');
-      why = 'no confirmation after clicking Apply';
+      why = (hadQuestionnaire ? 'questionnaire-stage: ' : '') + 'no confirmation after clicking Apply';
       log(`  🔬 calibration — url: ${d ? d.location.href.slice(0, 120) : '(no document)'}`);
       log(`  🔬 calibration — visible buttons: ${JSON.stringify(btns)}`);
       log(`  🔬 calibration — page text: "${d && d.body ? d.body.textContent.replace(/\s+/g, ' ').trim().slice(0, 300) : ''}"`);
@@ -507,11 +511,13 @@
 
     why = '';
     intervention = null;
+    hadQuestionnaire = false;
     const ok = await applyInPopup(popup, job);
     // Strictly true: 'external' is truthy and must not be counted as an application.
     // A claim is only a claim: the runner re-verifies it and answers with what is left.
     if (ok === true || ok === 'already-applied') {
-      const v = await report(job, 'APPLIED', ok === true ? (CONFIG.DRY_RUN ? 'dry-run' : 'confirmed in page') : 'already-applied');
+      const v = await report(job, 'APPLIED', ok === true ? (CONFIG.DRY_RUN ? 'dry-run' : 'confirmed in page') : 'already-applied',
+        { questionnaire: hadQuestionnaire });
       if (v) remaining = v.remaining;
       else if (ok === true) remaining--; // no runner: count locally
       log(`  remaining this run: ${remaining}`);
