@@ -80,10 +80,12 @@ async function geminiCall({ apiKey, model }, prompt, { fetchImpl, timeoutMs, now
       retryAfterMs: parseDuration(header(res, 'retry-after')) ?? parseDuration(retryInfo && retryInfo.retryDelay),
       daily, dailyUntil: daily ? nextPacificMidnight(now()) : null };
   }
+  // answer parts only: thinking models may return parts flagged `thought: true`
   const text = (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts || [])
-    .map((p) => p.text || '').join('');
+    .filter((p) => !p.thought).map((p) => p.text || '').join('');
   const u = data.usageMetadata || {};
-  return { ok: true, text, usage: { prompt: u.promptTokenCount ?? null, completion: u.candidatesTokenCount ?? null, total: u.totalTokenCount ?? null } };
+  return { ok: true, text, usage: { prompt: u.promptTokenCount ?? null, completion: u.candidatesTokenCount ?? null,
+    total: u.totalTokenCount ?? null, reasoning: u.thoughtsTokenCount ?? null } };
 }
 
 async function groqCall({ apiKey, model }, prompt, { fetchImpl, timeoutMs, now }) {
@@ -114,11 +116,44 @@ async function groqCall({ apiKey, model }, prompt, { fetchImpl, timeoutMs, now }
       daily, dailyUntil: daily ? new Date(now().getTime() + (tryAgain ?? retryAfterMs ?? 3600000)) : null };
   }
   const u = data.usage || {};
+  // content only — a reasoning model's thinking arrives in message.reasoning and is ignored
   return { ok: true, text: String((data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || ''),
-    usage: { prompt: u.prompt_tokens ?? null, completion: u.completion_tokens ?? null, total: u.total_tokens ?? null }, limits };
+    usage: { prompt: u.prompt_tokens ?? null, completion: u.completion_tokens ?? null, total: u.total_tokens ?? null,
+      reasoning: (u.completion_tokens_details && u.completion_tokens_details.reasoning_tokens) ?? null }, limits };
 }
 
-const parseJson = (text) => { try { return JSON.parse(String(text).replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '')); } catch (e) { return undefined; } };
+/**
+ * The JSON object in a model's reply. Only the reply CONTENT is ever passed here —
+ * Groq returns a reasoning model's thinking in a separate `message.reasoning` field
+ * (measured with openai/gpt-oss-120b, 2026-09-28), which is never read. Defensively,
+ * inline <think>…</think> blocks and code fences are stripped, and if prose still
+ * surrounds the JSON the LAST complete top-level object is used (the final answer comes
+ * after any thinking). Returns undefined when there is no JSON object at all.
+ */
+function parseJson(text) {
+  const t = String(text || '').replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '').trim();
+  try { const v = JSON.parse(t); if (v && typeof v === 'object' && !Array.isArray(v)) return v; } catch (e) { /* fall through */ }
+  let found;
+  for (let i = 0; i < t.length; i++) {
+    if (t[i] !== '{') continue;
+    const end = matchBrace(t, i);
+    if (end < 0) continue;
+    try { const v = JSON.parse(t.slice(i, end + 1)); if (v && typeof v === 'object' && !Array.isArray(v)) { found = v; i = end; } } catch (e) { /* not JSON */ }
+  }
+  return found;
+}
+/** Index of the brace closing the one at `start`, string-aware; -1 if unbalanced. */
+function matchBrace(t, start) {
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < t.length; i++) {
+    const c = t[i];
+    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') inStr = true;
+    else if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) return i;
+  }
+  return -1;
+}
 
 // ---------------------------------------------------------------- the chain
 
@@ -206,30 +241,43 @@ function createAi(config = {}, deps = {}) {
     for (const name of ['gemini', 'groq']) {
       const p = providers[name];
       if (!p.apiKey) { out[name] = { ok: false, model: p.model || null, reason: `${name === 'gemini' ? 'GEMINI_KEY' : 'GROQ_API_KEY'} is not set` }; continue; }
-      if (!p.model) { out[name] = { ok: false, model: null, reason: 'GROQ_MODEL is not set', models: await listModels(name) }; continue; }
+      if (!p.model) { out[name] = { ok: false, model: null, reason: 'GROQ_MODEL is not set', ...listing(await listModels(name)) }; continue; }
       if (dailyBlocked(name)) { out[name] = { ok: false, model: p.model, reason: `daily limit reached — unavailable until ${state[name].until}` }; continue; }
       const r = await p.call(p, 'Connectivity check. Reply with exactly this JSON and nothing else: {"ok":true}', { fetchImpl, timeoutMs: 20000, now });
       const json = r.ok ? parseJson(r.text) : undefined;
       const ok = !!(json && json.ok === true);
       out[name] = { ok, model: p.model, reason: ok ? 'responded' : r.ok ? 'responded without the expected JSON' : r.error,
         limits: r.limits || (name === 'gemini' ? 'not reported by Gemini' : null) };
-      if (r.status === 404) out[name].models = await listModels(name);
+      if (r.status === 404) Object.assign(out[name], listing(await listModels(name)));
     }
     return out;
   }
+  // listModels() result → check() fields: the list, or the reason it could not be read
+  const listing = (l) => (l.ok ? { models: l.models } : { listError: l.error });
 
+  /**
+   * Models this key can use → {ok: true, models} | {ok: false, error}. A failed listing
+   * is an error with its reason (e.g. "HTTP 401: Invalid API Key"), never an empty list —
+   * that silent [] is what hid an invalid key from --check before.
+   */
   async function listModels(name) {
     const p = providers[name];
+    const url = name === 'gemini' ? 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=300' : 'https://api.groq.com/openai/v1/models';
+    const headers = name === 'gemini' ? { 'x-goog-api-key': p.apiKey } : { Authorization: `Bearer ${p.apiKey}` };
+    let r, body;
     try {
-      if (name === 'gemini') {
-        const r = await fetchImpl('https://generativelanguage.googleapis.com/v1beta/models?pageSize=300', { headers: { 'x-goog-api-key': p.apiKey } });
-        const j = await r.json();
-        return (j.models || []).filter((m) => (m.supportedGenerationMethods || []).includes('generateContent')).map((m) => m.name.replace('models/', ''));
-      }
-      const r = await fetchImpl('https://api.groq.com/openai/v1/models', { headers: { Authorization: `Bearer ${p.apiKey}` } });
-      const j = await r.json();
-      return (j.data || []).filter((m) => m.active !== false).map((m) => m.id);
-    } catch (e) { return [`(could not list models: ${e.message})`]; }
+      r = await fetchImpl(url, { headers, signal: AbortSignal.timeout(20000) });
+      body = await r.text();
+    } catch (e) { return { ok: false, error: `request failed: ${e.message}` }; }
+    let j;
+    try { j = JSON.parse(body); } catch (e) { return { ok: false, error: `HTTP ${r.status}: non-JSON response: ${String(body).replace(/\s+/g, ' ').slice(0, 120)}` }; }
+    if (!r.ok) return { ok: false, error: `HTTP ${r.status}: ${(j.error && (j.error.message || j.error.status)) || String(body).slice(0, 120)}` };
+    const list = name === 'gemini' ? j.models : j.data;
+    if (!Array.isArray(list)) return { ok: false, error: `HTTP ${r.status}: unexpected response (no ${name === 'gemini' ? 'models' : 'data'} array)` };
+    const models = name === 'gemini'
+      ? list.filter((m) => (m.supportedGenerationMethods || []).includes('generateContent')).map((m) => String(m.name).replace('models/', ''))
+      : list.filter((m) => m.active !== false).map((m) => m.id);
+    return { ok: true, models };
   }
 
   return {
@@ -239,9 +287,23 @@ function createAi(config = {}, deps = {}) {
   };
 }
 
+/** check() results → the lines `node answer-engine.js --check` prints. */
+function formatCheck(results) {
+  const lines = [];
+  for (const [name, x] of Object.entries(results)) {
+    lines.push(`${name.padEnd(6)} ${x.ok ? 'WORKS' : 'FAILS'} — model ${x.model || '(none)'} — ${x.reason}`);
+    if (x.limits) lines.push(`       remaining limits: ${typeof x.limits === 'string' ? x.limits : JSON.stringify(x.limits)}`);
+    if (x.models) lines.push(`       models this key can use (${x.models.length}): ${x.models.join(', ') || '(none)'}`);
+    if (x.listError) lines.push(`       model listing FAILED: ${x.listError}`);
+  }
+  const n = Object.values(results).filter((x) => x.ok).length;
+  lines.push(n === 2 ? 'Both providers work.' : n === 1 ? 'WARNING: only one provider works — no fallback.' : 'No provider works: TEST/LIVE will refuse to start.');
+  return { lines, working: n };
+}
+
 /** Provider config from config.js (.env). */
 function aiConfig(cfg) {
   return { gemini: { apiKey: cfg.geminiKey, model: cfg.geminiModel || GEMINI_DEFAULT_MODEL }, groq: { apiKey: cfg.groqKey, model: cfg.groqModel } };
 }
 
-module.exports = { createAi, aiConfig, parseDuration, nextPacificMidnight, GEMINI_DEFAULT_MODEL, STATE_FILE };
+module.exports = { createAi, aiConfig, formatCheck, parseJson, parseDuration, nextPacificMidnight, GEMINI_DEFAULT_MODEL, STATE_FILE };

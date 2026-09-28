@@ -164,17 +164,23 @@ async function answer(q, { facts = {}, ai = null } = {}) {
 
 module.exports = { DEFAULT_MODEL, buildFacts, relevantFacts, factLookup, validate, askAi, answer, buildPrompt };
 
-// node answer-engine.js --check : each provider tested on its own (no fallback)
+// node answer-engine.js --check [--models] : each provider tested on its own (no fallback).
+// Models are listed when the model is missing or 404s, or always with --models; a failed
+// listing prints its actual error.
 if (require.main === module && process.argv.includes('--check')) {
+  const { formatCheck } = require('./ai-providers');
   const ai = createAi(aiConfig(require('./config')));
-  ai.check().then((r) => {
-    for (const [name, x] of Object.entries(r)) {
-      console.log(`${name.padEnd(6)} ${x.ok ? 'WORKS' : 'FAILS'} — model ${x.model || '(none)'} — ${x.reason}`);
-      if (x.limits) console.log(`       remaining limits: ${typeof x.limits === 'string' ? x.limits : JSON.stringify(x.limits)}`);
-      if (x.models) console.log(`       models this key can use: ${x.models.join(', ')}`);
+  (async () => {
+    const r = await ai.check();
+    if (process.argv.includes('--models')) {
+      for (const name of Object.keys(r)) {
+        if (r[name].models || r[name].listError || /is not set$/.test(r[name].reason) && !/MODEL/.test(r[name].reason)) continue;
+        const l = await ai.listModels(name);
+        if (l.ok) r[name].models = l.models; else r[name].listError = l.error;
+      }
     }
-    const n = Object.values(r).filter((x) => x.ok).length;
-    console.log(n === 2 ? 'Both providers work.' : n === 1 ? 'WARNING: only one provider works — no fallback.' : 'No provider works: TEST/LIVE will refuse to start.');
-    process.exit(n ? 0 : 1);
-  });
+    const { lines, working } = formatCheck(r);
+    for (const l of lines) console.log(l);
+    process.exit(working ? 0 : 1);
+  })();
 }

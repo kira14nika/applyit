@@ -208,6 +208,30 @@ Verified for real: `node answer-engine.js --check` → gemini WORKS (gemini-3.8-
 groq FAILS (GROQ_API_KEY not set) → "only one provider works". DRY run made 0 AI calls.
 Not verified: Groq against the real API (no key), a real Gemini daily-quota response.
 
+### Fix: empty Groq model list in `--check`
+
+Cause: `listModels()` never checked the HTTP status and read `data || []`, so any error
+response — e.g. `HTTP 401 {"error":{"message":"Invalid API Key"}}` — became an empty list.
+With `GROQ_MODEL` empty, `--check` only listed models (no chat call), so the error was
+invisible. Reproduced with a deliberately invalid key; with the current `.env` key the
+listing returns 11 models including `openai/gpt-oss-120b`.
+
+Fix: `listModels()` → `{ok, models}` or `{ok:false, error}` with the actual reason (HTTP
+status + provider message, non-JSON bodies, network errors, unexpected shapes); `--check`
+prints `model listing FAILED: <reason>`; `--check --models` always lists both providers.
+
+Reasoning models: Groq returns gpt-oss thinking in `message.reasoning` (verified live) and
+only `message.content` is parsed; Gemini `thought` parts are excluded. The parser also
+strips inline `<think>` blocks / fences and otherwise takes the last complete JSON object,
+so reasoning text can't break or steer the parse. Reasoning tokens are recorded in the
+per-call usage. Verified live: JSON mode with `openai/gpt-oss-120b` → option answered
+verbatim ("Power BI") and an unanswerable question → `unknown / missing-info`.
+
+Tests (+6, 88 total): listing errors (401 / HTML 403 / network / odd shape / success
+filtering), `--check` output shows the listing error, parse cases (fences, `<think>`,
+surrounding prose, last object wins, no JSON, arrays rejected), Groq `reasoning` field
+ignored + reasoning tokens recorded, Gemini thought parts ignored.
+
 ## What's left
 See the final report and [CONTROLLED-TEST.md](CONTROLLED-TEST.md). Nothing in this
 build clicked Apply: TEST and LIVE are implemented and unit-tested but have not been run.

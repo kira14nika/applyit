@@ -9,7 +9,9 @@ const E = require('./answer-engine');
 
 // ---- mock transport: queues of responses per provider --------------------------------
 const res = ({ status = 200, body = {}, headers = {} }) => ({
-  ok: status >= 200 && status < 300, status, json: async () => body,
+  ok: status >= 200 && status < 300, status,
+  json: async () => (typeof body === 'string' ? JSON.parse(body) : body),
+  text: async () => (typeof body === 'string' ? body : JSON.stringify(body)),
   headers: { get: (n) => headers[n.toLowerCase()] ?? null },
 });
 const gOk = (obj) => ({ body: { candidates: [{ content: { parts: [{ text: JSON.stringify(obj) }] } }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 } } });
@@ -45,7 +47,7 @@ test('Gemini ok → answered by Gemini; tokens recorded', async () => {
   const { ai, fetchImpl, records } = mk({ gemini: [gOk({ x: 1 })] });
   const r = await ai.askJson('p', { purpose: 'answer' });
   assert.deepStrictEqual([r.ok, r.provider, r.model, r.retries, r.fallbackReason], [true, 'gemini', 'gem-m', 0, null]);
-  assert.deepStrictEqual(r.usage, { prompt: 10, completion: 5, total: 15 });
+  assert.deepStrictEqual(r.usage, { prompt: 10, completion: 5, total: 15, reasoning: null });
   assert.deepStrictEqual(fetchImpl.calls, { gemini: 1, groq: 0 });
   assert.strictEqual(records[0].purpose, 'answer');
   assert.strictEqual(records[0].provider, 'gemini');
@@ -66,7 +68,7 @@ test('Gemini 503 twice → Groq ok, with the fallback reason recorded', async ()
   const r = await ai.askJson('p');
   assert.deepStrictEqual([r.ok, r.provider, r.model], [true, 'groq', 'groq-m']);
   assert.match(r.fallbackReason, /^gemini: HTTP 503/);
-  assert.deepStrictEqual(r.usage, { prompt: 20, completion: 6, total: 26 });
+  assert.deepStrictEqual(r.usage, { prompt: 20, completion: 6, total: 26, reasoning: null });
   assert.deepStrictEqual(fetchImpl.calls, { gemini: 2, groq: 1 });
   assert.strictEqual(records[0].retries, 1);
 });
@@ -208,6 +210,76 @@ test('check(): each provider on its own; lists Groq models when GROQ_MODEL is mi
   const r = await ai.check();
   assert.deepStrictEqual([r.gemini.ok, r.gemini.model, r.gemini.limits], [true, 'gem-m', 'not reported by Gemini']);
   assert.deepStrictEqual([r.groq.ok, r.groq.reason, r.groq.models], [false, 'GROQ_MODEL is not set', ['model-a']]);
+});
+
+// ---- model listing: a failure is an error with its reason, never an empty list ----------
+const { formatCheck, parseJson } = require('./ai-providers');
+const lister = (response) => createAi({ gemini: { apiKey: 'g', model: 'gem-m' }, groq: { apiKey: 'bad', model: '' } },
+  { stateFile: null, fetchImpl: async (url) => {
+    if (/generateContent/.test(url)) return res(gOk({ ok: true }));
+    if (response instanceof Error) throw response;
+    return res(response);
+  } });
+
+test('listModels: 401 / non-JSON / network / odd shape are errors with the reason (the old code returned [])', async () => {
+  const e401 = await lister({ status: 401, body: { error: { message: 'Invalid API Key', type: 'invalid_request_error', code: 'invalid_api_key' } } }).listModels('groq');
+  assert.deepStrictEqual(e401, { ok: false, error: 'HTTP 401: Invalid API Key' });
+  const html = await lister({ status: 403, body: '<html><body>error code: 1010</body></html>' }).listModels('groq');
+  assert.strictEqual(html.ok, false);
+  assert.match(html.error, /^HTTP 403: non-JSON response: <html>/);
+  const net = await lister(new Error('getaddrinfo ENOTFOUND api.groq.com')).listModels('groq');
+  assert.deepStrictEqual(net, { ok: false, error: 'request failed: getaddrinfo ENOTFOUND api.groq.com' });
+  const odd = await lister({ status: 200, body: { object: 'list' } }).listModels('groq');
+  assert.deepStrictEqual(odd, { ok: false, error: 'HTTP 200: unexpected response (no data array)' });
+  const good = await lister({ status: 200, body: { object: 'list', data: [{ id: 'openai/gpt-oss-120b', active: true }, { id: 'old', active: false }, { id: 'x' }] } }).listModels('groq');
+  assert.deepStrictEqual(good, { ok: true, models: ['openai/gpt-oss-120b', 'x'] });
+});
+
+test('--check prints the listing error instead of an empty model list', async () => {
+  const r = await lister({ status: 401, body: { error: { message: 'Invalid API Key' } } }).check();
+  assert.deepStrictEqual([r.groq.ok, r.groq.reason, r.groq.models, r.groq.listError], [false, 'GROQ_MODEL is not set', undefined, 'HTTP 401: Invalid API Key']);
+  const { lines, working } = formatCheck(r);
+  assert.ok(lines.includes('       model listing FAILED: HTTP 401: Invalid API Key'), lines.join('\n'));
+  assert.ok(!lines.some((l) => /models this key can use \(0\)/.test(l)));
+  assert.strictEqual(working, 1);
+  const ok = formatCheck({ groq: { ok: false, model: null, reason: 'GROQ_MODEL is not set', models: ['openai/gpt-oss-120b'] } });
+  assert.ok(ok.lines.includes('       models this key can use (1): openai/gpt-oss-120b'));
+});
+
+// ---- reasoning models: thinking must never break or steer the JSON parse ----------------
+test('parseJson: clean JSON, fences, inline <think>, surrounding prose (last object wins), no JSON', () => {
+  assert.deepStrictEqual(parseJson('{"status":"answered","answer":"Yes","evidence":"x"}'), { status: 'answered', answer: 'Yes', evidence: 'x' });
+  assert.deepStrictEqual(parseJson('```json\n{"a":1}\n```'), { a: 1 });
+  assert.deepStrictEqual(parseJson('<think>Maybe {"status":"unknown"}? Let me check {"a": 17}.</think>\n{"status":"answered","answer":"No"}'),
+    { status: 'answered', answer: 'No' });
+  assert.deepStrictEqual(parseJson('Schema: {"status":"answered"|"unknown"}. Draft: {"answer":"draft"}. Final:\n{"answer":"final","note":"a } in a string"}'),
+    { answer: 'final', note: 'a } in a string' }, 'invalid schema braces skipped, last complete object used');
+  assert.strictEqual(parseJson('I cannot answer that.'), undefined);
+  assert.strictEqual(parseJson(''), undefined);
+  assert.strictEqual(parseJson('[1,2]'), undefined, 'an array is not an answer object');
+});
+
+test('Groq gpt-oss: reasoning in message.reasoning is ignored — the answer comes from content', async () => {
+  const body = {
+    choices: [{ message: { role: 'assistant',
+      reasoning: 'The user wants JSON. Wrong idea first: {"status":"answered","answer":"No","evidence":"guess"}. Actually 17 is prime.',
+      content: '{"status":"answered","answer":"Yes","evidence":"skills"}' } }],
+    usage: { prompt_tokens: 143, completion_tokens: 196, total_tokens: 339, completion_tokens_details: { reasoning_tokens: 154 } },
+  };
+  const { ai } = mk({ gemini: [gDaily], groq: [{ body }] });
+  const r = await ai.askJson('p');
+  assert.deepStrictEqual(r.json, { status: 'answered', answer: 'Yes', evidence: 'skills' });
+  assert.deepStrictEqual(r.usage, { prompt: 143, completion: 196, total: 339, reasoning: 154 });
+  const inline = mk({ gemini: [gDaily], groq: [{ body: { choices: [{ message: { content: '<think>{"answer":"No"}</think>{"status":"answered","answer":"Yes","evidence":"skills"}' } }] } }] });
+  assert.strictEqual((await inline.ai.askJson('p')).json.answer, 'Yes');
+});
+
+test('Gemini thought parts are ignored — only answer parts are parsed', async () => {
+  const body = { candidates: [{ content: { parts: [{ thought: true, text: 'thinking {"answer":"No"}' }, { text: '{"answer":"Yes"}' }] } }],
+    usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 5, totalTokenCount: 50, thoughtsTokenCount: 33 } };
+  const { ai } = mk({ gemini: [{ body }] });
+  const r = await ai.askJson('p');
+  assert.deepStrictEqual([r.json, r.usage.reasoning], [{ answer: 'Yes' }, 33]);
 });
 
 test('duration and Pacific-midnight helpers', () => {
