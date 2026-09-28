@@ -88,7 +88,7 @@
           <div class="kv"><span>Results</span><span id="tallies">—</span></div>
         </div>
         <div class="panel">
-          <div class="k">AI match (advisory — never skips a job)</div>
+          <div class="k">Match (below your threshold → skipped, not applied)</div>
           <div id="cur-match" class="muted">—</div>
           <div class="k" style="margin-top:10px">Current question</div>
           <div id="cur-question" class="muted">—</div>
@@ -115,6 +115,7 @@
           <button data-f="SKIPPED" class="chip">Skipped</button>
           <button data-f="FAILED" class="chip">Failed</button>
           <button data-f="DEFERRED" class="chip">Deferred</button>
+          <button data-f="WALKIN" class="chip">Walk-ins</button>
           <button data-f="TODAY" class="chip">Today</button>
         </div>
         <label>From <input type="date" id="f-from"></label>
@@ -161,8 +162,12 @@
         <label class="check"><input type="checkbox" id="adv-aimatch"> <b>AI matching</b></label>
         <p class="note">Scores each job against your resume with AI (one AI request per job, uses your AI quota). Off: a free local score is used instead.</p>
         <label class="check"><input type="checkbox" id="adv-thr-on"> <b>Match threshold</b> <input id="adv-thr" type="number" min="0" max="100" style="width:70px"> %</label>
-        <p class="note">Marks jobs scoring below this number. It only flags them — no job is skipped because of its score.</p>
+        <p class="note">Jobs scoring below this are not applied to (recorded as skipped: low match). Default 50%; untick to apply regardless of score.</p>
         <button id="adv-save">Save advanced settings</button> <span id="adv-status" class="muted"></span>
+        <hr>
+        <button id="adv-reset" class="danger">Reset test data…</button>
+        <p class="note">Moves the job history, saved run logs and AI limit markers into archive/&lt;timestamp&gt;/. Never touches your application ledger, deferred jobs, profile or preferences.</p>
+        <span id="adv-reset-status" class="muted"></span>
       </details>
     </section>
   </main>

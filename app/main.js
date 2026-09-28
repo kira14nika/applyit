@@ -194,6 +194,20 @@ function inboxUpdate(key, fn) {
   try { resumeProfile.save(fn(resumeProfile.load() || {}, group)); } catch (e) { return { ok: false, error: e.message }; }
   return { ok: true, ...inboxView() };
 }
+// ---------------------------------------------------------------- Reset test data (archive, never delete)
+ipcMain.handle('data:resetTestData', async () => {
+  if (child) return { ok: false, error: 'stop the run first' };
+  const R = require('../reset-test-data');
+  const { dialog } = require('electron');
+  const ans = await dialog.showMessageBox(win, { type: 'warning', buttons: ['Cancel', 'Archive test data'], defaultId: 0, cancelId: 0,
+    title: 'Reset test data',
+    message: 'Move test data into archive/<timestamp>/ ?',
+    detail: `Archived (moved, not deleted): ${R.ARCHIVED.join(', ')}.
+
+NEVER touched: ${R.PROTECTED.join(', ')} — your application ledger, deferred jobs, profile and preferences stay exactly as they are.` });
+  if (ans.response !== 1) return { ok: false, cancelled: true };
+  try { return { ok: true, ...R.resetTestData({ root: ROOT }) }; } catch (e) { return { ok: false, error: e.message }; }
+});
 ipcMain.handle('inbox:list', () => inboxView());
 ipcMain.handle('inbox:answer', (_e, { key, answer } = {}) => inboxUpdate(String(key), (p, g) => inbox.saveAnswer(p, g, answer)));
 ipcMain.handle('inbox:dont', (_e, { key } = {}) => inboxUpdate(String(key), (p, g) => inbox.dontAnswer(p, g)));

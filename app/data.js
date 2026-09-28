@@ -22,6 +22,8 @@ function historyFor(history, jobId) {
   return history.filter((h) => h.type === 'job' && h.jobId === jobId).sort((a, b) => String(b.ts).localeCompare(String(a.ts)));
 }
 const detailsFrom = (hs) => hs.find((h) => h.mode !== 'DRY') || hs[0] || {};
+/** Walk-in date/venue from the job page details or the skip record; null when not a walk-in. */
+const walkInOf = (d) => d.walkIn || (d.outcome && d.outcome.applyRoute && d.outcome.applyRoute.walkIn) || null;
 
 function buildApplications({ ledger = [], history = [], deferred = [] }) {
   const rows = [];
@@ -31,6 +33,7 @@ function buildApplications({ ledger = [], history = [], deferred = [] }) {
       jobId: r.jobId, ts: r.ts, day: r.day, platform: 'Naukri', category: categoryOf(r), status: r.status,
       reason: r.reason, title: r.title || d.title || '', company: r.company || d.company || '',
       location: d.location || '', url: r.url, match: d.match ? d.match.score : null,
+      walkIn: walkInOf(d),
     });
   }
   const inLedger = new Set(rows.map((r) => r.jobId));

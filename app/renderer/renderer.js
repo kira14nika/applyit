@@ -92,7 +92,7 @@ function renderSnapshot(s, ev) {
   $('tallies').textContent = `Applied ${t.applied} · Already applied ${t.alreadyApplied} · Skipped ${t.skipped} · Failed ${t.failed} · Deferred ${t.deferred}` + (t.wouldApply ? ` · Would apply (dry) ${t.wouldApply}` : '');
   const m = s.match;
   $('cur-match').textContent = !m ? '—' : m.score == null ? 'unknown — add skills to your profile in Setup'
-    : `${m.score}% ${m.decision} (${m.source})${m.belowThreshold ? ' · below your threshold — advisory only' : ''}` +
+    : `${m.score}% ${m.decision} (${m.source})${m.belowThreshold ? ' · below your threshold — will be skipped' : ''}` +
       ` · matched: ${(m.matchedSkills || []).join(', ') || '—'} · missing: ${(m.missingSkills || []).join(', ') || '—'}`;
   $('cur-question').textContent = s.question ? s.question.question : '—';
   $('cur-answer').textContent = s.question ? (s.question.answer ?? '(generating…)') : '—';
@@ -159,7 +159,7 @@ function renderApplications() {
   const from = $('f-from').value, to = $('f-to').value;
   const co = $('f-company').value.trim().toLowerCase(), ti = $('f-title').value.trim().toLowerCase();
   const rows = appRows.filter((r) =>
-    (appFilter === 'ALL' || (appFilter === 'TODAY' ? r.day === todayKey : r.category === appFilter)) &&
+    (appFilter === 'ALL' || (appFilter === 'TODAY' ? r.day === todayKey : appFilter === 'WALKIN' ? !!r.walkIn : r.category === appFilter)) &&
     (!from || r.day >= from) && (!to || r.day <= to) &&
     (!co || r.company.toLowerCase().includes(co)) && (!ti || r.title.toLowerCase().includes(ti)));
   const body = $('apps-body'); body.textContent = '';
@@ -167,7 +167,8 @@ function renderApplications() {
     body.append(el('tr', { onclick: () => openJob(r.jobId) },
       el('td', { text: fmtTime(r.ts) }), el('td', { text: r.title || r.jobId }), el('td', { text: r.company }),
       el('td', { text: r.location }), el('td', {}, el('span', { class: `pill ${r.category}`, text: CAT[r.category] || r.category })),
-      el('td', { text: r.reason }), el('td', { text: r.match == null ? '' : `${r.match}%` }), el('td', { text: r.platform })));
+      el('td', { text: r.walkIn ? `${r.reason} · walk-in: ${[r.walkIn.when, r.walkIn.venue].filter(Boolean).join(' · ')}` : r.reason }),
+      el('td', { text: r.match == null ? '' : `${r.match}%` }), el('td', { text: r.platform })));
   }
   $('apps-empty').classList.toggle('hidden', rows.length > 0);
 }
@@ -186,7 +187,7 @@ async function openJob(id) {
   row('Search', d.search); row('Results page', d.page); row('URL', (j.ledger[0] && j.ledger[0].url) || d.url);
   root.append(el('div', { class: 'panel' }, info));
   if (d.match) {
-    root.append(el('h3', { class: 'section-title', text: `AI match (advisory): ${d.match.score}% — ${d.match.decision}` }),
+    root.append(el('h3', { class: 'section-title', text: `Match (${d.match.source || 'rules'}): ${d.match.score}% — ${d.match.decision}` }),
       el('div', { class: 'panel' }, el('div', { text: `Matched: ${(d.match.matchedSkills || []).join(', ') || '—'}` }),
         el('div', { text: `Missing: ${(d.match.missingSkills || []).join(', ') || '—'}` }),
         el('ul', {}, (d.match.reasons || []).map((x) => el('li', { text: x })))));
@@ -239,7 +240,7 @@ async function loadReports() {
   const fails = Object.entries(r.failures).sort((a, b) => b[1] - a[1]);
   root.append(el('h3', { class: 'section-title', text: 'Failure reasons' }),
     fails.length ? table(['Reason', 'Count'], fails) : el('p', { class: 'muted', text: 'None recorded.' }));
-  root.append(el('h3', { class: 'section-title', text: 'AI matching (advisory)' }),
+  root.append(el('h3', { class: 'section-title', text: 'Matching' }),
     el('p', { text: r.matching.jobs ? `${r.matching.jobs} jobs scored, average ${r.matching.avgScore}%` : 'No jobs scored yet.' }));
   root.append(el('h3', { class: 'section-title', text: 'Runs' }),
     table(['Run', 'Mode', 'Started', 'Jobs', 'Outcomes'], r.runs.map((x) => [x.runId, x.mode, fmtTime(x.first), x.jobs,
@@ -249,7 +250,7 @@ async function loadReports() {
 // ---------------------------------------------------------------- Settings > Advanced (both default Off)
 async function loadAdvanced() {
   const d = await api.setup.load();
-  const m = (d.prefs && d.prefs.matching) || { aiEnabled: false, thresholdEnabled: false, threshold: 60 };
+  const m = (d.prefs && d.prefs.matching) || { aiEnabled: false, thresholdEnabled: true, threshold: 50 };
   $('adv-aimatch').checked = !!m.aiEnabled;
   $('adv-thr-on').checked = !!m.thresholdEnabled;
   $('adv-thr').value = m.threshold;
@@ -259,6 +260,12 @@ $('adv-save').onclick = async () => {
   const r = await api.setup.savePrefs({ matching: { aiEnabled: $('adv-aimatch').checked, thresholdEnabled: $('adv-thr-on').checked, threshold: $('adv-thr').value } });
   const m = r.prefs.matching;
   $('adv-status').textContent = `Saved — AI matching ${m.aiEnabled ? 'on' : 'off'}, threshold ${m.thresholdEnabled ? m.threshold + '%' : 'off'}.`;
+};
+
+$('adv-reset').onclick = async () => {
+  const r = await api.resetTestData();
+  $('adv-reset-status').textContent = r.ok ? (r.moved.length ? `Archived ${r.moved.join(', ')} → ${r.archiveDir}` : 'Nothing to archive.')
+    : r.cancelled ? 'Cancelled — nothing changed.' : `Not done: ${r.error}`;
 };
 
 syncMode();

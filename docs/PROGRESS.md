@@ -289,6 +289,35 @@ Note: with "AI matching" on, DRY runs also spend AI quota (one request per job).
   depends on live results.
 - Tests: `naukri-filters.test.js` (7).
 
+### Parts C–G — low-match gate, walk-ins, pacing, location recheck, run logs ✅
+- **C** Match runs only after the Apply button is found. Below the threshold (Settings >
+  Advanced, default 50 %, can be Off) → not applied, SKIPPED `low-match: <score>% (rules|ai)`
+  with matched/missing skills in history. Gate uses the AI score when AI matching is on,
+  else rules; a matching error never blocks (fails open). Rules: Excel ≈ Advanced/Microsoft
+  Excel, MySQL ≈ SQL, …; generic tags (communication, coding, …) ignored; Remote fits when
+  Remote is selected. Duplicate postings (same company, ≥80 % same title words) → only the
+  first is opened.
+- **D** Loaded job page with no Apply control → decided 1.5 s after load: another control
+  ("I am interested", "Register") → SKIPPED `unsupported-apply-route: <text>` (never
+  clicked, visible buttons logged); none → SKIPPED `no-online-apply`. Not loaded → unchanged
+  (wait, FAILED retryable). Employer name from the job page beats the card's industry label.
+  Applications: "Walk-ins" filter shows date/venue (ledger rows only — DRY writes no ledger).
+- **E** Pause only after a real/simulated apply: 45–120 s, DRY 5–15 s. None after skipped,
+  deferred, filtered, no-button or already-applied jobs.
+- **F** Card without a readable location → checked on the job page; outside your cities →
+  "filtered" (logged, not recorded in the ledger).
+- **G** Every run saves `runs/<runId>.log` + `runs/<runId>.events.jsonl` (git-ignored) with
+  per-page counts (seen / title-filtered / excluded / location-filtered / duplicates /
+  opened) and a final run-summary with the stop reason.
+
+### Part H — Reset test data ✅
+Settings > Advanced > "Reset test data…": confirmation dialog, then MOVES
+naukri-history.jsonl, runs/ and ai-state.json into `archive/<timestamp>/` (git-ignored).
+Never touches naukri-ledger.jsonl, naukri-deferred.jsonl, profile.json, preferences.json
+(the dialog says so). The old in-page "seen" lists live in Chrome's localStorage and are no
+longer used for anything, so there is no file to archive.
+- Tests: `fix-round.test.js` (11). Full suite 113 pass.
+
 ## What's left
 See the final report and [CONTROLLED-TEST.md](CONTROLLED-TEST.md). Nothing in this
 build clicked Apply: TEST and LIVE are implemented and unit-tested but have not been run.

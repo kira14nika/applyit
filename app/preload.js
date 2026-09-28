@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('applyit', {
   applications: () => ipcRenderer.invoke('data:applications'),
   job: (id) => ipcRenderer.invoke('data:job', id),
   reports: () => ipcRenderer.invoke('data:reports'),
+  resetTestData: () => ipcRenderer.invoke('data:resetTestData'),
   setup: {
     load: () => ipcRenderer.invoke('setup:load'),
     pickResume: () => ipcRenderer.invoke('setup:pickResume'),
