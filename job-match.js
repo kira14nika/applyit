@@ -1,7 +1,7 @@
 /**
- * Job ↔ profile matching — ADVISORY ONLY. Nothing here can reject or skip a job; the
- * result is stored in history and shown in the app. (A threshold setting exists and
- * defaults to OFF; even when on it only flags `belowThreshold`, it does not gate.)
+ * Job ↔ profile matching. The score is stored in history and shown in the app; the
+ * runner's low-match gate (Settings > Advanced threshold, default 50 %, can be Off)
+ * skips jobs whose score is below it — after the Apply-button check, never before.
  *
  *   ruleMatch(job, facts, prefs)            deterministic, offline, always available
  *   aiMatch(job, facts, prefs, {ai})        the AI chain, only when the "AI matching" setting
@@ -28,15 +28,51 @@ function userYears(facts, prefs) {
 }
 const decide = (score) => (score >= 70 ? 'good-match' : score >= 45 ? 'partial-match' : 'weak-match');
 
+/**
+ * Skill equivalents: different spellings of the same skill count as one
+ * (Excel ≈ Advanced Excel ≈ Microsoft Excel, MySQL ≈ SQL, …). Kept deliberately small.
+ */
+const ALIASES = [
+  ['excel', ['excel', 'ms excel', 'ms-excel', 'microsoft excel', 'advanced excel', 'advance excel', 'advanced ms excel', 'excel vba']],
+  ['sql', ['sql', 'mysql', 'my sql', 'postgresql', 'postgres', 'ms sql', 'mssql', 'sql server', 'ms sql server', 't-sql', 'tsql', 'pl/sql', 'plsql', 'oracle sql', 'sql queries']],
+  ['power bi', ['power bi', 'powerbi', 'power-bi', 'ms power bi', 'microsoft power bi', 'power bi desktop']],
+  ['python', ['python', 'python3', 'python 3']],
+  ['tableau', ['tableau', 'tableau desktop']],
+  ['data visualization', ['data visualization', 'data visualisation']],
+  ['data analysis', ['data analysis', 'data analytics']],
+  ['statistics', ['statistics', 'statistical analysis']],
+  ['machine learning', ['machine learning', 'ml']],
+  ['google sheets', ['google sheets', 'gsheets', 'google spreadsheets']],
+];
+/** Tags that say nothing about fit: never counted as matched or missing. */
+const GENERIC = new Set(['coding', 'consulting', 'communication', 'communication skills', 'verbal communication', 'written communication',
+  'time management', 'teamwork', 'team work', 'team player', 'problem solving', 'analytical', 'analytical skills', 'analytical thinking',
+  'leadership', 'management', 'english', 'fluent english', 'interpersonal skills', 'presentation', 'presentation skills', 'hard working',
+  'self motivated', 'attention to detail', 'multitasking', 'fresher', 'freshers', 'b.tech fresher', 'any graduate', 'graduate',
+  'computer science', 'computer sceince']);
+const norm = (s) => low(s).replace(/[^a-z0-9+#/.\s-]/g, ' ').replace(/\s+/g, ' ').trim();
+/** Canonical form of a skill/tag (alias group name, else the normalised text). */
+function canon(s) {
+  const n = norm(s);
+  for (const [name, list] of ALIASES) if (list.includes(n)) return name;
+  return n;
+}
+const aliasesOf = (skill) => { const c = canon(skill); const g = ALIASES.find(([n]) => n === c); return g ? g[1] : [norm(skill)]; };
+const isGeneric = (t) => GENERIC.has(norm(t));
+
 function ruleMatch(job, facts = {}, prefs = null) {
   const skills = skillsOf(facts);
   const text = jobText(job);
   if (!skills.length) {
     return { score: null, decision: 'unknown', matchedSkills: [], missingSkills: [], reasons: ['no skills in the profile to compare against'], source: 'rules' };
   }
-  const matched = skills.filter((s) => mentions(text, s));
-  // "missing" only from the job's own explicit skill tags — never guessed from prose
-  const missing = (job.tags || []).filter((t) => !skills.some((s) => low(s) === low(t) || mentions(t, s)));
+  const tags = (job.tags || []).filter((t) => !isGeneric(t));
+  const tagCanon = new Set(tags.map(canon));
+  const mine = new Set(skills.map(canon));
+  // matched: one of your skills (or an equivalent spelling) is a job tag or appears in its text
+  const matched = skills.filter((s) => tagCanon.has(canon(s)) || aliasesOf(s).some((a) => mentions(text, a)));
+  // "missing" only from the job's own explicit, non-generic skill tags — never guessed from prose
+  const missing = tags.filter((t) => !mine.has(canon(t)));
   const skillFit = matched.length / Math.max(1, matched.length + missing.length);
   const reasons = [`${matched.length} of your skills appear in the job; ${missing.length} of its listed skills are not in your profile`];
   let expFit = 0.5;
@@ -47,9 +83,13 @@ function ruleMatch(job, facts = {}, prefs = null) {
   } else reasons.push('experience fit unknown');
   let locFit = 0.5;
   const lf = prefs ? require('./preferences').locationFilter(prefs) : null;
-  if (lf && job.location) {
-    locFit = lf.locations.some((l) => low(job.location).includes(low(l))) || (lf.remote && /remote|work from home/i.test(job.location)) ? 1 : 0;
-    reasons.push(`location ${job.location}: ${locFit ? 'preferred' : 'not in your preferred locations'}`);
+  const remoteOk = !!(prefs && (prefs.workModes || []).includes('remote'));
+  if (job.location && remoteOk && /remote|work from home/i.test(job.location)) {
+    locFit = 1; // Remote is a fit whenever you selected Remote
+    reasons.push(`location ${job.location}: remote, and you accept remote`);
+  } else if (lf && job.location) {
+    locFit = lf.locations.some((l) => low(job.location).includes(low(l))) ? 1 : 0;
+    reasons.push(`location ${job.location}: ${locFit ? 'one of your cities' : 'not one of your cities'}`);
   }
   const score = Math.round(100 * (0.7 * skillFit + 0.2 * expFit + 0.1 * locFit));
   return { score, decision: decide(score), matchedSkills: matched, missingSkills: missing, reasons, source: 'rules' };
@@ -82,11 +122,15 @@ async function aiMatch(job, facts = {}, prefs = null, opts = {}) {
   return { score: Math.round(score), decision, matchedSkills: matched, missingSkills: missing, reasons, source: 'ai', ai: { provider: res.provider, model: res.model }, rules: { score: base.score, decision: base.decision } };
 }
 
-/** The threshold only FLAGS (advisory); it never returns a reject/skip decision. */
+/**
+ * Mark a match below the user's threshold. The runner's low-match gate (onCheckMatch)
+ * turns `belowThreshold` into "don't apply → SKIPPED low-match". Off, or an unknown
+ * score (no profile skills), never marks.
+ */
 function applyThreshold(match, prefs) {
   const t = prefs?.matching;
   if (!t || !t.thresholdEnabled || match.score == null) return { ...match, belowThreshold: false };
   return { ...match, threshold: t.threshold, belowThreshold: match.score < t.threshold };
 }
 
-module.exports = { ruleMatch, aiMatch, applyThreshold, parseYears };
+module.exports = { ruleMatch, aiMatch, applyThreshold, parseYears, canon, isGeneric };

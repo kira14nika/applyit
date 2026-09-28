@@ -47,6 +47,9 @@
     // than anything the stealth plugin can hide. 10 jobs now take ~8-20 minutes.
     MIN_DELAY_MS: 45000,
     MAX_DELAY_MS: 120000,
+    // DRY runs submit nothing, so they only need a short human-ish gap
+    DRY_MIN_DELAY_MS: 5000,
+    DRY_MAX_DELAY_MS: 15000,
 
     // Job titles to apply to (case-insensitive substring match on the job title)
     TITLE_KEYWORDS: [
@@ -154,6 +157,10 @@
     chatOption: '[class*="chatbot" i] label, [class*="chip" i], [class*="radio" i] label, [class*="checkbox" i] label',
     nextPageText: /^next$/i,
     noResults: '[class*="no-result-container" i]',
+    // job page (measured 2026-09-28): header parts, the apply area, the employer link
+    jobHeader: '[class*="jhc__"], [class*="jd-header-title" i]',
+    applyArea: '[class*="apply-button-container" i]',
+    employer: '[class*="jd-header-comp-name" i] a',
   };
 
   // ======================= CROSS-PASTE STATE =======================
@@ -274,8 +281,17 @@
   // true once this job's questionnaire opened: its FAILED reasons are tagged
   // "questionnaire-stage:" so the runner can cap repeated questionnaire failures
   let hadQuestionnaire = false;
+  // {reason, extra} for a job ApplyIt deliberately doesn't apply to (low match, walk-in,
+  // unsupported apply route, no online apply) — reported to the runner as SKIPPED
+  let skip = null;
+  /** Ask the runner's low-match gate. No runner (pasted by hand) or an error = go ahead. */
+  async function checkMatch(job) {
+    if (typeof window.__aaCheckMatch !== 'function') return { ok: true };
+    try { return (await window.__aaCheckMatch(job.id)) || { ok: true }; } catch (e) { return { ok: true }; }
+  }
   async function applyInPopup(popup, job) {
     popup.location.href = job.href;
+    let loadedAt = 0;
     const applyBtn = await waitFor(() => {
       const doc = popup.document;
       if (!doc || !doc.body) return null;
@@ -288,25 +304,67 @@
       const btn = findButtonByText(doc, SELECTORS.applyButtonText) ||
                   doc.querySelector('#apply-button, button[id*="apply" i]');
       if (btn && SELECTORS.alreadyAppliedText.test(btn.textContent.trim())) return 'applied';
-      return btn;
+      if (btn) return btn;
+      // Fully loaded job page (its header is there) but no Apply / company-site control:
+      // decide after a short grace instead of waiting 30 s (walk-ins, "I am interested").
+      if (doc.readyState === 'complete' && doc.querySelector(SELECTORS.jobHeader)) {
+        if (!loadedAt) loadedAt = Date.now();
+        if (Date.now() - loadedAt > 1500) return 'no-apply';
+      }
+      return null;
     }, 30000);
 
     {
       const d = popup.document;
-      emit('opening-application', { jobId: job.id, text: 'job page open', details: {
+      // the job page's employer beats the card's label (cards can show an industry,
+      // e.g. "IT Services and Consulting"); walk-in pages only have "hiring for"
+      const employer = textOf(d, SELECTORS.employer);
+      if (employer) job.company = employer;
+      emit('opening-application', { jobId: job.id, text: 'job page open', job: { id: job.id, title: job.title, company: job.company }, details: {
         // class names measured on a live job page 2026-09-28 (styles_jhc__exp__…, …)
-        location: textOf(d, '[class*="jhc__location__"]'),
+        location: textOf(d, '[class*="jhc__location__"]') || textOf(d, '[class*="jhc__loc__"]'),
         salary: textOf(d, '[class*="jhc__salary__"]'),
         experience: textOf(d, '[class*="jhc__exp__"]'),
         stats: textOf(d, '[class*="jhc__jd-stats__"]'),
+        employer, hiringFor: textOf(d, '[class*="jhc__hiring-for" i]'),
+        walkIn: textOf(d, '[class*="jhc__walkin__" i]') ? { when: textOf(d, '[class*="jhc__walkin__" i]'), venue: textOf(d, '[class*="jhc__venue" i]') } : null,
         description: jobContext(d, job).description,
       } });
     }
+    // The card had no readable location: check it on the job page rather than letting it through.
+    if (job.locationUnknown && applyBtn && LF) {
+      const pageLoc = textOf(popup.document, '[class*="jhc__location__"]') || textOf(popup.document, '[class*="jhc__loc__"]');
+      log(`  📍 card had no location; job page says: "${pageLoc || '(none)'}"`);
+      if (pageLoc && !locationOk(pageLoc)) { why = `location "${pageLoc}" is not one of your cities`; return 'filtered'; }
+    }
     if (!applyBtn) { log('  ⚠ no Apply button found — skipping.'); why = 'no Apply button within 30s'; return false; }
+    if (applyBtn === 'no-apply') {
+      const d = popup.document;
+      const area = [...d.querySelectorAll(`${SELECTORS.applyArea} button, ${SELECTORS.applyArea} a`)].filter(visible)
+        .map((b) => b.textContent.trim()).filter((t) => t && !/^save$/i.test(t));
+      const buttons = [...d.querySelectorAll('button, a, [role="button"]')].filter(visible).map((b) => (b.textContent || '').trim()).filter((t) => t && t.length < 40);
+      const other = area[0] || buttons.find((t) => /interest|register|apply|express|walk.?in/i.test(t) && !/^save$|send me jobs/i.test(t));
+      log(`  🧾 no Apply / company-site control — visible buttons: ${JSON.stringify(buttons.slice(0, 12))}`);
+      const walkIn = textOf(d, '[class*="jhc__walkin__" i]');
+      skip = other
+        ? { reason: `unsupported-apply-route: ${other}`, extra: { applyRoute: { control: other, buttons: buttons.slice(0, 12), walkIn: walkIn ? { when: walkIn, venue: textOf(d, '[class*="jhc__venue" i]') } : null } } }
+        : { reason: 'no-online-apply', extra: { applyRoute: { control: null, buttons: buttons.slice(0, 12), walkIn: walkIn ? { when: walkIn, venue: textOf(d, '[class*="jhc__venue" i]') } : null } } };
+      log(`  ⏭ ${skip.reason} — not clicking it`);
+      return 'not-applicable';
+    }
     // In-page JS can't follow the handoff to the employer's domain (cross-origin),
     // so hand the job to the Node runner, which applies on the company site itself.
     if (applyBtn === 'external') { log(`  🔗 EXTERNAL | ${job.title} | ${job.href}`); return 'external'; }
     if (applyBtn === 'applied') { log('  already applied — skipping.'); return 'already-applied'; }
+
+    // Low-match gate — only now, after the Apply button check, so company-site and
+    // no-button jobs never cost a match (or an AI call). Node decides.
+    const gate = await checkMatch(job);
+    if (!gate.ok) {
+      skip = { reason: gate.reason, extra: { lowMatch: gate.match || null } };
+      log(`  ⏭ ${gate.reason} — not applying`);
+      return 'low-match';
+    }
 
     if (CONFIG.DRY_RUN) {
       log(`  🔍 DRY_RUN — would click: "${applyBtn.textContent.trim()}". Set DRY_RUN=false to apply for real.`);
@@ -468,13 +526,27 @@
     try { return (await window.__aaMayStartJob()) === true; } catch (e) { return false; }
   };
 
+  // Duplicate postings: the same company with a near-identical title (e.g. one walk-in
+  // advertised for five towns) — only the first one is opened in a run.
+  const words = (t) => new Set(String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean));
+  const nearSame = (a, b) => { const x = words(a), y = words(b); let n = 0; for (const w of x) if (y.has(w)) n++; return x.size && y.size && n / (x.size + y.size - n) >= 0.8; };
+  const opened = [...(__CFG.openedPostings || [])];
+  const isDuplicate = (company, title) => !!company && opened.some((o) => o.company.toLowerCase() === company.toLowerCase() && nearSame(o.title, title));
+
+  // Per-page counts for the run log (Part G): what the page offered and what happened to it.
+  let openedOnPage = 0;
+  let last = { cards: 0, excluded: 0, titleFiltered: 0, locationFiltered: 0, duplicates: 0 };
+  const pageSummary = (end) => emit('page-summary', { text: end, page: location.href,
+    counts: { seen: last.cards, titleFiltered: last.titleFiltered, excluded: Math.max(0, last.excluded - openedOnPage - last.duplicates),
+      locationFiltered: last.locationFiltered, duplicates: last.duplicates, opened: openedOnPage } });
+
   let extQueued = 0;
   while (remaining > 0) {
-    if (!(await mayStartJob())) { log('⏹ stopped by the runner — no new job started.'); break; }
+    if (!(await mayStartJob())) { log('⏹ stopped by the runner — no new job started.'); pageSummary('stopped'); break; }
     const cards = [...document.querySelectorAll(SELECTORS.jobCards)].filter(visible);
     let job = null;
 
-    let nSeen = 0, nFiltered = 0;
+    let nSeen = 0, nFiltered = 0, nLoc = 0, nDup = 0;
     // TEST: allow-listed job URLs given on the command line come first, opened directly
     const direct = (__CFG.directJobs || []).find((d) => d.id && !EXCLUDED.has(d.id));
     if (direct) job = { href: direct.href, id: direct.id, title: '(test job)', company: '', card: null };
@@ -484,11 +556,15 @@
       const title = link.textContent.replace(/\s+/g, ' ').trim();
       if (EXCLUDED.has(idOf(link.href))) { nSeen++; continue; }
       if (!titleOk(title)) { nFiltered++; continue; }
-      if (!locationOk(textOf(card, '.locWdth'))) { nFiltered++; continue; }
+      const cardLoc = textOf(card, '.locWdth');
+      if (!locationOk(cardLoc)) { nLoc++; continue; }
       const company = (card.querySelector('.comp-name, [class*="comp-name" i]')?.textContent || '').trim();
-      job = { href: link.href, id: idOf(link.href), title, company, card };
+      if (isDuplicate(company, title)) { nDup++; EXCLUDED.add(idOf(link.href)); log(`  ⧉ duplicate posting skipped: ${title} — ${company}`); continue; }
+      // no readable location on the card: it is checked on the job page instead
+      job = { href: link.href, id: idOf(link.href), title, company, card, locationUnknown: !cardLoc };
       break;
     }
+    last = { cards: cards.length, excluded: nSeen, titleFiltered: nFiltered, locationFiltered: nLoc, duplicates: last.duplicates + nDup };
     if (job) emit('checking-job', { jobId: job.id, text: 'checking job',
       job: { id: job.id, title: job.title, company: job.company, url: job.href },
       details: job.card ? {
@@ -503,8 +579,9 @@
       // Split the two very different reasons for "nothing to do here": jobs already
       // visited on an earlier run vs jobs the title filter rejected. Reporting a
       // combined "0 match" made an exhausted page look like a broken filter.
-      log(`(this page: ${cards.length} cards — ${nSeen} excluded (applied/skipped/tried), ${nFiltered} filtered out; sample: ${sample})`);
+      log(`(this page: ${cards.length} cards — ${nSeen} excluded (applied/skipped/tried), ${nFiltered} title-filtered, ${nLoc} location-filtered, ${last.duplicates} duplicates, ${openedOnPage} opened; sample: ${sample})`);
       const nextBtn = findButtonByText(document, SELECTORS.nextPageText);
+      pageSummary(nextBtn ? 'next page' : 'last page');
       if (nextBtn) {
         log('🌐 Next results page — the page will reload. PASTE THE SCRIPT AGAIN when it loads.');
         popup.close();
@@ -518,12 +595,15 @@
     EXCLUDED.add(job.id); // never twice in one injection, whatever the outcome
     state[SEEN_KEY].push(job.href); // legacy; no longer read for exclusion
     saveState();
+    openedOnPage++;
+    opened.push({ company: job.company, title: job.title }); // duplicates are judged on the card's company
     log(`▶ Applying: ${job.title} | ${job.href}`);
     job.card?.scrollIntoView({ block: 'center' });
 
     why = '';
     intervention = null;
     hadQuestionnaire = false;
+    skip = null;
     const ok = await applyInPopup(popup, job);
     // Strictly true: 'external' is truthy and must not be counted as an application.
     // A claim is only a claim: the runner re-verifies it and answers with what is left.
@@ -539,6 +619,13 @@
       // Apply WAS clicked; the runner stores the details and, after a SKIPPED, looks
       // at what Naukri now shows for the job (history only — counts are untouched).
       await report(job, 'SKIPPED', `human-needed: ${intervention.category}`, { intervention, clicked: true });
+    } else if (ok === 'low-match' || ok === 'not-applicable') {
+      // deliberately not applied (no click happened): low match score, walk-in /
+      // unsupported apply route, or no online apply at all
+      await report(job, 'SKIPPED', skip.reason, { ...skip.extra, clicked: false });
+    } else if (ok === 'filtered') {
+      // not one of the user's cities after all (read on the job page) — nothing to record
+      emit('filtered', { jobId: job.id, text: why });
     }
     // ok === 'denied': the click gate said no — nothing happened, nothing to record
     if (ok === 'external') {
@@ -554,10 +641,16 @@
         break;
       }
     }
-    const pause = CONFIG.MIN_DELAY_MS + Math.random() * (CONFIG.MAX_DELAY_MS - CONFIG.MIN_DELAY_MS);
-    emit('waiting', { text: `pausing ${Math.round(pause / 1000)}s before the next job`, ms: Math.round(pause) });
-    await sleep(pause);
+    // Pacing: pause only after a real or simulated apply (DRY: short). Skipped, deferred,
+    // filtered, no-button and already-applied jobs go straight to the next card.
+    if (ok === true && remaining > 0) {
+      const [lo, hi] = CONFIG.DRY_RUN ? [CONFIG.DRY_MIN_DELAY_MS, CONFIG.DRY_MAX_DELAY_MS] : [CONFIG.MIN_DELAY_MS, CONFIG.MAX_DELAY_MS];
+      const pause = lo + Math.random() * (hi - lo);
+      emit('waiting', { text: `pausing ${Math.round(pause / 1000)}s before the next job`, ms: Math.round(pause) });
+      await sleep(pause);
+    }
   }
+  if (remaining <= 0) pageSummary('run target reached');
 
   popup.close();
   log(CONFIG.DRY_RUN

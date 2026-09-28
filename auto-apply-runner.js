@@ -41,11 +41,13 @@ process.on('unhandledRejection', (e) => {
   if (isBenignRace(e)) return console.log(`${stamp()} (ignored navigation race) ${firstLine(e).slice(0, 120)}`);
   surfacedErrors++;
   console.error(`${stamp()} ERROR unhandledRejection: ${(e && e.stack) || e}`);
+  try { if (logSink) logSink(`${stamp()} ERROR unhandledRejection: ${firstLine(e)}`); } catch (x) { /* not initialised yet */ }
   try { emit('error', { text: `ERROR: ${firstLine(e)}` }); } catch (x) { /* not initialised yet */ }
 });
 process.on('uncaughtException', (e) => {
   if (isBenignRace(e)) return console.log(`${stamp()} (ignored navigation race) ${firstLine(e).slice(0, 120)}`);
   console.error(`${stamp()} FATAL uncaughtException: ${(e && e.stack) || e}`);
+  try { if (logSink) logSink(`${stamp()} FATAL uncaughtException: ${firstLine(e)}`); } catch (x) { /* not initialised yet */ }
   try { emit('error', { text: `FATAL: ${firstLine(e)}` }); } catch (x) { /* not initialised yet */ }
   process.exit(1); // state is unknown after an uncaught exception; Playwright closes Chrome on exit
 });
@@ -211,7 +213,8 @@ const MAX_RUNTIME_MS = 100 * 60 * 1000;
 const MAX_RESTARTS = 8; // browser gets closed and reopened this many times before giving up
 const IDLE_ROTATE_MS = 4 * 60 * 1000;
 
-const log = (msg) => console.log(`[${new Date().toLocaleString()}] [${SITE_ARG}] ${msg}`);
+let logSink = null; // runs/<runId>.log once the run log exists
+const log = (msg) => { const line = `[${new Date().toLocaleString()}] [${SITE_ARG}] ${msg}`; console.log(line); if (logSink) logSink(line); };
 
 // Detail sidecar (naukri-history.jsonl): every mode writes it, tagged with the mode, so
 // dry runs are inspectable too. It never feeds a count — the ledger alone does that.
@@ -229,6 +232,9 @@ const { createBus, createTracker, PAGE_STATES } = require('./run-events');
 const bus = run ? createBus({ runId: RUN_ID, mode: MODE }) : null;
 const tracker = bus ? createTracker({ bus, write: historyAppend }) : null;
 const emit = (state, data = {}) => { if (bus) bus.emitState(state, data); };
+// Saved run log + events (runs/<runId>.log / .events.jsonl), git-ignored.
+const runLog = run ? require('./run-log').createRunLog(RUN_ID) : { line() {}, event() {}, pageSummary() {}, finish() {}, pages: [] };
+if (run) { logSink = (l) => runLog.line(l); bus.on('event', (ev) => runLog.event(ev)); }
 
 // ======== CSV log of every submitted application (created once, appended forever) ========
 const CSV_FILE = path.join(__dirname, 'applications.csv');
@@ -260,6 +266,7 @@ function logApplication(job) {
 // share localStorage with the /jobs feed across navigations (measured 2026-08-12 — the
 // stored list kept resetting to 1), so the script re-opened the same job every cycle.
 const seenJobs = new Set(); // /jobs/<id>-slug of every job already opened this run
+const openedPostings = []; // {company, title} opened this run — the page skips near-identical duplicates
 function buildInjection(max = TARGET) {
   let raw = fs
     .readFileSync(path.join(__dirname, site.script), 'utf8')
@@ -275,6 +282,7 @@ function buildInjection(max = TARGET) {
     window.__APPLY_CONFIG = ${JSON.stringify({ seen: [...seenJobs], ...(run ? {
       // ledger sites answer in Node (__aaAnswer): no CV and no API key ever enter the page
       excluded: [...new Set([...run.browserConfig().excluded, ...deferredIds])],
+      openedPostings, // duplicates: same company + near-identical title → open only the first
       // TEST: allow-listed job URLs are opened directly, before any search card
       directJobs: POLICY.directUrls.map((u) => ({ href: u, id: require('./naukri-ledger').jobId(u) })),
       // Setup preferences: title words and locations filter cards (never URL params)
@@ -610,8 +618,6 @@ function buildInjection(max = TARGET) {
     r = r || {};
     const rid = require('./naukri-ledger').jobId(r.url);
     tracker?.touch(rid, { url: r.url, title: r.title, company: r.company });
-    // let an in-flight AI match land in this job's history (bounded; never blocks the outcome)
-    if (pendingMatch.has(rid)) await Promise.race([pendingMatch.get(rid), new Promise((res) => setTimeout(res, 15000))]);
     try {
       if (!LIVE) { // dry run: nothing is written, simulated applies still pace the run
         run.excluded.add(rid); // in memory: don't re-walk it this run
@@ -624,7 +630,9 @@ function buildInjection(max = TARGET) {
           finishJob(rid, { status: 'DRY', reason: 'would apply — not submitted' }, 'would-apply');
         } else {
           log(`  (dry run — would record ${r.status}: ${r.reason})`);
-          finishJob(rid, { status: 'DRY', reason: `would record ${r.status}: ${r.reason}` }, null);
+          // a deliberate skip (low match, walk-in, no online apply) still shows as skipped in a DRY run's tallies
+          finishJob(rid, { status: 'DRY', reason: `would record ${r.status}: ${r.reason}`, applyRoute: r.applyRoute || null, lowMatch: r.lowMatch || null },
+            r.status === 'SKIPPED' ? 'skipped' : null);
         }
         emit('waiting', { counts: counts(), text: 'dry run — next job' });
         return { remaining: TARGET - submitted };
@@ -668,7 +676,7 @@ function buildInjection(max = TARGET) {
           const afterAbandon = r.clicked ? await verifyNaukriApplied(source.context, r.url) : null;
           if (afterAbandon) log(`  (after abandoning, the job page reads: ${afterAbandon})`);
           finishJob(rid, { status: 'SKIPPED', reason: rec.reason, intervention: r.intervention || null,
-            clicked: !!r.clicked, pageStateAfterAbandon: afterAbandon }, 'skipped');
+            clicked: !!r.clicked, pageStateAfterAbandon: afterAbandon, applyRoute: r.applyRoute || null, lowMatch: r.lowMatch || null }, 'skipped');
         } else {
           finishJob(rid, { status: 'FAILED', reason: rec.reason }, 'failed');
         }
@@ -741,32 +749,41 @@ function buildInjection(max = TARGET) {
       jobInFlight = true;
       tracker.touch(jid, { searchIdx, search: site.searches[searchIdx], page: resumeUrl });
     }
+    if (e.state === 'checking-job' && e.job) openedPostings.push({ company: e.job.company || '', title: e.job.title || '' });
     if (e.details || e.job) tracker.touch(jid, { ...(e.job || {}), ...(e.details || {}) });
     const { state, ...data } = e;
+    if (state === 'page-summary') { runLog.pageSummary(data); emit('page-summary', data); return true; }
     tracker.event(jid, state, data);
-    if (state === 'opening-application') startMatch(jid);
+    // not one of the user's cities (read on the job page): observation only, nothing recorded
+    if (state === 'filtered') finishJob(jid, { status: 'FILTERED', reason: e.text || 'location' }, null);
     return true;
   }
 
-  // ---- AI matching (Phase 6) — ADVISORY ONLY: stored and shown, never gates a job ----
+  // ---- Low-match gate (Part C) — called by the page AFTER the Apply-button check ----
+  // Rules match by default; the AI score when "AI matching" is on (Settings > Advanced).
+  // Below the threshold (default 50 %, can be Off) the page does not apply and the job is
+  // recorded SKIPPED "low-match: <score>% (<rules|ai>)". Unknown score (no profile
+  // skills) never blocks. Counting/verification of APPLIED is untouched.
   const jobMatch = require('./job-match');
-  const pendingMatch = new Map();
-  function startMatch(jid) {
-    const d = tracker.details(jid);
-    if (!d) return;
-    const job = { title: d.title, company: d.company, location: d.location, experience: d.experience,
-      salary: d.salary, tags: d.tags || [], description: d.description || '' };
-    const record = (m) => {
-      if (!tracker.has(jid)) return; // job already finished
+  const MATCH_PREFS = PREFS || require('./preferences').normalize({});
+  async function onCheckMatch(source, id) {
+    const jid = String(id || '');
+    try {
+      const d = tracker.details(jid) || {};
+      const job = { title: d.title, company: d.company, location: d.location, experience: d.experience,
+        salary: d.salary, tags: d.tags || [], description: d.description || '' };
+      let m = jobMatch.ruleMatch(job, FACTS, MATCH_PREFS);
+      if (AI && MATCH_PREFS.matching.aiEnabled) m = await jobMatch.aiMatch(job, FACTS, MATCH_PREFS, { ai: AI });
+      m = jobMatch.applyThreshold(m, MATCH_PREFS);
       tracker.touch(jid, { match: m });
-      tracker.event(jid, 'ai-matching', { match: m, text: m.score == null ? 'match unknown (no profile skills)'
-        : `match ${m.score}% (${m.source}) — ${m.decision}${m.belowThreshold ? ' — below your threshold (advisory only, still processed)' : ''}` });
-    };
-    record(jobMatch.applyThreshold(jobMatch.ruleMatch(job, FACTS, PREFS), PREFS));
-    // AI matching spends AI quota: only when the Setup setting "AI matching" is on (default OFF)
-    if (AI && PREFS && PREFS.matching && PREFS.matching.aiEnabled) {
-      pendingMatch.set(jid, jobMatch.aiMatch(job, FACTS, PREFS, { ai: AI })
-        .then((m) => record(jobMatch.applyThreshold(m, PREFS))).catch(() => {}).finally(() => pendingMatch.delete(jid)));
+      tracker.event(jid, 'ai-matching', { match: m, text: m.score == null ? 'match unknown (no profile skills) — not gated'
+        : `match ${m.score}% (${m.source})${m.belowThreshold ? ` — below ${m.threshold}%: not applying` : ''}` });
+      if (!m.belowThreshold) return { ok: true, score: m.score };
+      return { ok: false, reason: `low-match: ${m.score}% (${m.source === 'ai' ? 'ai' : 'rules'})`,
+        match: { score: m.score, source: m.source, threshold: m.threshold, matchedSkills: m.matchedSkills, missingSkills: m.missingSkills } };
+    } catch (e) {
+      log(`  (match error, not gated: ${firstLine(e)})`);
+      return { ok: true };
     }
   }
 
@@ -914,6 +931,7 @@ function buildInjection(max = TARGET) {
     await ctx.exposeBinding('__aaAnswer', onAnswer);
     await ctx.exposeBinding('__aaEvent', onEvent);
     await ctx.exposeBinding('__aaMayStartJob', onMayStartJob);
+    await ctx.exposeBinding('__aaCheckMatch', onCheckMatch);
   }
   currentCtx = ctx;
   if (stopRequested) { await ctx.close().catch(() => {}); return; }
@@ -1064,6 +1082,9 @@ function buildInjection(max = TARGET) {
   const endReason = stopRequested ? (stopReason || 'stopped by the user') : testDone ? 'all TEST jobs reached an outcome' : submitted >= TARGET ? 'run target reached'
     : searchesExhausted ? 'all searches exhausted' : pastDeadline() ? 'time limit reached' : 'browser restarts exhausted';
   emit(stopRequested ? 'stopped' : 'completed', { counts: counts(), text: endReason, errors: surfacedErrors, final: true });
+  runLog.finish({ reason: endReason, mode: MODE, counts: counts(), tallies: bus ? bus.snapshot.tallies : null, errors: surfacedErrors,
+    searches: site.searches });
+  if (run) log(`Run log saved: ${runLog.logPath}`);
   // forked by the app: the open IPC channel would keep this process alive
   if (process.connected) { process.removeAllListeners('disconnect'); process.disconnect(); }
   if (surfacedErrors) log(`⚠ ${surfacedErrors} unexpected error(s) were logged during this run — see ERROR lines above.`);

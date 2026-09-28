@@ -20,11 +20,12 @@ const STATES = [
   'opening-application', 'filling-application', 'generating-answer', 'filling-answer',
   'submitting', 'waiting', 'verifying', 'application-verified', 'already-applied',
   'skipped', 'failed', 'deferred', 'would-apply', 'paused', 'resumed', 'stopped', 'completed', 'error',
+  'filtered', 'page-summary',
 ];
 // outcome states that end a job and bump a per-run tally ('would-apply' = DRY run only)
 const TALLY = { 'application-verified': 'applied', 'already-applied': 'alreadyApplied', skipped: 'skipped', failed: 'failed', deferred: 'deferred', 'would-apply': 'wouldApply' };
 // states the page may report through __aaEvent; everything else is Node's to say
-const PAGE_STATES = ['checking-job', 'opening-application', 'submitting', 'filling-answer', 'waiting'];
+const PAGE_STATES = ['checking-job', 'opening-application', 'submitting', 'filling-answer', 'waiting', 'filtered', 'page-summary'];
 
 function createBus({ runId, mode, send = typeof process.send === 'function' ? (m) => process.send(m) : null } = {}) {
   const em = new EventEmitter();

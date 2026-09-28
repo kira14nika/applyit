@@ -47,7 +47,7 @@ test('AI: invented skills are removed; off-contract output falls back to rules',
 test('AI matching defaults OFF; threshold defaults ON at 50%', () => {
   assert.deepStrictEqual(P.normalize({}).matching, { aiEnabled: false, thresholdEnabled: true, threshold: 50 }, 'AI matching off; low-match gate on at 50%');
   const runner = require('fs').readFileSync(require('path').join(__dirname, 'auto-apply-runner.js'), 'utf8');
-  assert.ok(runner.includes('if (AI && PREFS && PREFS.matching && PREFS.matching.aiEnabled) {'), 'no AI call for matching unless the setting is on');
+  assert.ok(runner.includes('if (AI && MATCH_PREFS.matching.aiEnabled) m = await jobMatch.aiMatch('), 'no AI call for matching unless the setting is on');
   const low = { score: 30, decision: 'weak-match' };
   assert.strictEqual(M.applyThreshold(low, P.normalize({ matching: { thresholdEnabled: false } })).belowThreshold, false, 'off → no flag');
   const flagged = M.applyThreshold(low, P.normalize({ matching: { thresholdEnabled: true, threshold: 50 } }));
@@ -55,12 +55,18 @@ test('AI matching defaults OFF; threshold defaults ON at 50%', () => {
   assert.ok(!['skip', 'reject'].includes(flagged.decision));
 });
 
-test('the runner never gates on the match', () => {
+test('the runner gates only below the threshold, and only after the Apply-button check', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, 'auto-apply-runner.js'), 'utf8');
-  const block = src.slice(src.indexOf('function startMatch'), src.indexOf('function startMatch') + 1500);
-  assert.ok(!/return false|excluded\.add|finishJob|run\.record/.test(block), 'startMatch only records and emits');
+  const gate = src.slice(src.indexOf('async function onCheckMatch'), src.indexOf('async function onCheckMatch') + 2000);
+  assert.ok(gate.includes('if (!m.belowThreshold) return { ok: true'), 'passes unless below the threshold');
+  assert.ok(gate.includes("reason: `low-match: ${m.score}% (${m.source === 'ai' ? 'ai' : 'rules'})`"));
+  assert.ok(!/run.record|finishJob/.test(gate), 'the gate decides; the normal report path records');
+  const page = require('fs').readFileSync(require('path').join(__dirname, 'naukri-auto-apply.js'), 'utf8');
+  const i = (t) => page.indexOf(t);
+  assert.ok(i("if (applyBtn === 'external')") < i('const gate = await checkMatch(job);'), 'company-site jobs never reach the match');
+  assert.ok(i("if (applyBtn === 'no-apply')") < i('const gate = await checkMatch(job);'), 'no-button jobs never reach the match');
+  assert.ok(i('const gate = await checkMatch(job);') < i('if (CONFIG.DRY_RUN) {'), 'the gate also applies in DRY runs');
 });
-
 test('experience ranges parse', () => {
   assert.deepStrictEqual(M.parseYears('1 - 4 years'), { min: 1, max: 4 });
   assert.deepStrictEqual(M.parseYears('3 to 8 Yrs'), { min: 3, max: 8 });

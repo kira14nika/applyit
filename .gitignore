@@ -11,6 +11,8 @@ naukri-history.jsonl
 profile.json
 preferences.json
 ai-state.json
+runs/
+archive/
 *.png
 
 # saved browser sessions (contain logged-in cookies)
