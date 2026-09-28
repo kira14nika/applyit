@@ -94,4 +94,18 @@ function buildReports({ ledger = [], history = [], deferred = [] }) {
   return { daily, outcomes, interventions, failures, runs: Object.values(runs).sort((a, b) => String(b.first).localeCompare(String(a.first))), matching };
 }
 
-module.exports = { categoryOf, buildApplications, jobDetails, buildReports, dayCounts };
+/** AI calls made today (local day), per provider, from the history's ai-call records. */
+function aiCallsToday(history = [], now = new Date()) {
+  const key = (d) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  const today = key(now);
+  const out = { gemini: 0, groq: 0, failed: 0, tokens: { gemini: 0, groq: 0 } };
+  for (const h of history) {
+    if (h.type !== 'ai-call' || !h.ts || key(new Date(h.ts)) !== today) continue;
+    if (!h.ok || !h.provider) { out.failed++; continue; }
+    out[h.provider] = (out[h.provider] || 0) + 1;
+    if (h.usage && typeof h.usage.total === 'number') out.tokens[h.provider] = (out.tokens[h.provider] || 0) + h.usage.total;
+  }
+  return out;
+}
+
+module.exports = { categoryOf, buildApplications, jobDetails, buildReports, dayCounts, aiCallsToday };

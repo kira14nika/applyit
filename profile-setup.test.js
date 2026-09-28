@@ -35,7 +35,9 @@ const RESUME = [
   'Certification: PL-300 Power BI Data Analyst',
 ];
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'setup-'));
-const gemini = (obj) => async () => ({ ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(obj) }] } }] }) });
+const gemini = (obj) => async () => ({ ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(obj) }] } }] }), headers: { get: () => null } });
+const { createAi } = require('./ai-providers');
+const chain = (fetchImpl) => createAi({ gemini: { apiKey: 'k', model: 'm' } }, { fetchImpl, stateFile: null, sleep: async () => {} });
 
 test('PDF text is extracted locally', async () => {
   const f = path.join(tmp(), 'resume.pdf');
@@ -46,7 +48,7 @@ test('PDF text is extracted locally', async () => {
 
 test('grounding keeps only what the resume says; guesses are dropped and listed', async () => {
   const text = RESUME.join('\n');
-  const { profile, dropped, ai } = await R.buildProfile(text, { apiKey: 'k', fetchImpl: gemini({
+  const { profile, dropped, ai } = await R.buildProfile(text, { ai: chain(gemini({
     name: 'Test Candidate', email: 'test.candidate@example.com', phone: '+919876543210', location: 'Pune, Maharashtra',
     skills: ['SQL', 'Power BI', 'Tableau'], tools: ['Excel'], languages: [],
     jobs: [{ title: 'Data Analyst', employer: 'Acme Analytics', start: 'Jan 2022', end: 'Present' },
@@ -54,8 +56,8 @@ test('grounding keeps only what the resume says; guesses are dropped and listed'
     education: [{ degree: 'B.Sc Statistics', institution: 'Pune University', year: '2020' }],
     certifications: ['PL-300 Power BI Data Analyst', 'AWS Certified'],
     projects: [],
-  }) });
-  assert.strictEqual(ai, 'ok');
+  })) });
+  assert.strictEqual(ai, 'ok (gemini m)');
   assert.strictEqual(profile.name, 'Test Candidate');
   assert.strictEqual(profile.phone, '+919876543210', 'phone matched on digits');
   assert.strictEqual(profile.location, '', '"Pune, Maharashtra" is not written in the resume');
@@ -67,7 +69,7 @@ test('grounding keeps only what the resume says; guesses are dropped and listed'
 
 test('no key or an AI error → only literal email/phone, nothing guessed', async () => {
   const text = RESUME.join('\n');
-  for (const opts of [{ apiKey: '' }, { apiKey: 'k', fetchImpl: async () => { throw new Error('offline'); } }]) {
+  for (const opts of [{ ai: null }, { ai: chain(async () => { throw new Error('offline'); }) }]) {
     const { profile, ai } = await R.buildProfile(text, opts);
     assert.strictEqual(profile.email, 'test.candidate@example.com');
     assert.ok(profile.phone.includes('98765'));

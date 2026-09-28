@@ -2,7 +2,7 @@
  * Resume → profile.json. Everything here runs in Node.
  *
  *   extractPdfText(file)                       local text extraction (pdfjs-dist)
- *   buildProfile(text, {apiKey, model})        Gemini structures the text, then EVERY value
+ *   buildProfile(text, {ai})                   the AI chain (Gemini → Groq) structures it, then EVERY value
  *                                              is checked against the resume text and dropped
  *                                              if it does not literally appear there
  *   load() / save(profile)                     profile.json (git-ignored)
@@ -15,7 +15,6 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { askJson } = require('./answer-engine');
 
 const PROFILE = path.join(__dirname, 'profile.json');
 
@@ -102,16 +101,17 @@ const PROMPT = [
  * error) only the literal email/phone patterns found in the text are filled — the
  * user completes the rest by hand. Never throws.
  */
-async function buildProfile(text, { apiKey = '', model, fetchImpl } = {}) {
+async function buildProfile(text, { ai = null } = {}) {
   const base = { ...EMPTY(), email: (text.match(/[\w.+-]+@[\w-]+\.[\w.]+/) || [''])[0],
     phone: (text.match(/\+?\d[\d\s-]{8,}\d/) || [''])[0].trim() };
-  if (!apiKey) return { profile: base, dropped: [], ai: 'not configured (GEMINI_KEY is empty) — fill the profile in by hand' };
-  const res = await askJson(`${PROMPT}\n\nRESUME TEXT:\n${text.slice(0, 30000)}`, { apiKey, model, fetchImpl });
+  if (!ai) return { profile: base, dropped: [], ai: 'not configured (no AI key) — fill the profile in by hand' };
+  const res = await ai.askJson(`${PROMPT}\n\nRESUME TEXT:\n${text.slice(0, 30000)}`, { purpose: 'resume-extraction' });
   if (!res.ok) return { profile: base, dropped: [], ai: `AI error: ${res.error}` };
+  // the grounding filter applies to every provider's output alike
   const { profile, dropped } = groundProfile(res.json || {}, text);
   if (!profile.email) profile.email = base.email;
   if (!profile.phone) profile.phone = base.phone;
-  return { profile, dropped, ai: 'ok' };
+  return { profile, dropped, ai: `ok (${res.provider} ${res.model})` };
 }
 
 function load(file = PROFILE) {

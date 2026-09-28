@@ -44,13 +44,13 @@ async function startRun(opts, { forcedCheck } = {}) {
   try { spec = runnerArgs(opts); } catch (e) { return { ok: false, error: e.message }; }
   // same AI check as the runner (which repeats it): TEST/LIVE never start without working AI.
   // forcedCheck exists only so the self-test can prove the refusal without any real key.
+  let warning = null;
   if (spec.mode !== 'DRY') {
-    const { geminiKey, geminiModel } = cfg();
-    const engine = require('../answer-engine');
-    const check = forcedCheck || await engine.checkModel({ apiKey: geminiKey, model: geminiModel || engine.DEFAULT_MODEL });
-    const pf = aiPreflight(spec.mode, check);
+    const checks = forcedCheck || await makeAi().check();
+    const pf = aiPreflight(spec.mode, checks);
     if (!pf.ok) return { ok: false, error: pf.reason };
     if (forcedCheck) return { ok: false, error: 'self-test: forced check passed — not starting' }; // never fork from a test
+    warning = pf.warning;
   }
   if (child) return { ok: false, error: 'a run is already in progress' };
   lastMode = spec.mode;
@@ -75,7 +75,8 @@ async function startRun(opts, { forcedCheck } = {}) {
     selftestOnExit(code);
   });
   send('run:log', `▶ started: node auto-apply-runner.js ${spec.args.join(' ')}`);
-  return { ok: true, mode: spec.mode };
+  if (warning) send('run:log', `⚠ ${warning}`);
+  return { ok: true, mode: spec.mode, warning };
 }
 
 function control(action) {
@@ -99,7 +100,8 @@ ipcMain.handle('browser:visibility', (_e, show) => browserVisibility(!!show));
 ipcMain.handle('data:dashboard', () => {
   const recs = ledger.load();
   return { running: !!child, mode: lastMode, snapshot: lastSnapshot, events: recentEvents.slice(-80),
-    today: ledger.todayApplied(recs), dailyCap: 50, perRun: 10, excluded: ledger.excludedIds(recs).size };
+    today: ledger.todayApplied(recs), dailyCap: 50, perRun: 10, excluded: ledger.excludedIds(recs).size,
+    aiToday: data.aiCallsToday(history.load()), aiStatus: makeAi().status() };
 });
 ipcMain.handle('data:applications', () => data.buildApplications(files()));
 ipcMain.handle('data:job', (_e, id) => data.jobDetails(files(), String(id)));
@@ -109,6 +111,11 @@ ipcMain.handle('data:reports', () => data.buildReports(files()));
 const resumeProfile = require('../resume-profile');
 const preferences = require('../preferences');
 const cfg = () => { delete require.cache[require.resolve('../config')]; return require('../config'); }; // .env may change
+/** The same Gemini → Groq chain the runner uses; app-side AI calls are recorded in history too. */
+function makeAi() {
+  const { createAi, aiConfig } = require('../ai-providers');
+  return createAi(aiConfig(cfg()), { onCall: (c) => { try { history.append({ type: 'ai-call', runId: 'app', mode: 'SETUP', ...c }); } catch (e) { /* ignore */ } } });
+}
 const str = (v) => (typeof v === 'string' ? v.trim() : '');
 const strs = (v) => (Array.isArray(v) ? v.map(str).filter(Boolean) : []);
 /** Only known fields, only strings — the renderer's input is never trusted as-is. */
@@ -131,8 +138,9 @@ ipcMain.handle('setup:load', () => {
   const profile = resumeProfile.load();
   const prefs = preferences.load();
   return {
-    profile, prefs, hasKey: !!cfg().geminiKey,
-    model: cfg().geminiModel || require('../answer-engine').DEFAULT_MODEL, max: preferences.MAX,
+    profile, prefs, hasKey: !!(cfg().geminiKey || cfg().groqKey),
+    model: Object.entries(makeAi().status()).filter(([, s]) => s.configured).map(([n, s]) => `${n} ${s.model}`).join(' → ') || 'none',
+    max: preferences.MAX,
     appFacts: resumeProfile.APP_FACTS.map(({ key, label }) => ({ key, label })),
     // where each application fact currently comes from (setup / resume / env / none)
     factSources: resumeProfile.applicationFacts(profile, prefs, cfg().CV).sources,
@@ -148,8 +156,8 @@ ipcMain.handle('setup:extract', async (_e, file) => {
     if (!/\.pdf$/i.test(String(file)) || !fs.existsSync(file)) return { ok: false, error: 'choose a PDF file' };
     const text = await resumeProfile.extractPdfText(file);
     if (!text) return { ok: false, error: 'no text found in this PDF (is it a scanned image?)' };
-    const { geminiKey, geminiModel } = cfg();
-    const r = await resumeProfile.buildProfile(text, { apiKey: geminiKey, model: geminiModel });
+    const c = cfg();
+    const r = await resumeProfile.buildProfile(text, { ai: (c.geminiKey || c.groqKey) ? makeAi() : null });
     return { ok: true, ...r, profile: { ...r.profile, resumeFile: file, resumeText: text } };
   } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
@@ -190,9 +198,9 @@ let st = null;
 async function selftestStart() {
   st = { step: 'wait-job', seen: [], timer: setTimeout(() => selftestDone(false, 'timeout'), 300000) };
   // TEST/LIVE must be refused when the AI check fails (forced failure: nothing can start)
-  const t = await startRun({ mode: 'TEST', only: '123456789012' }, { forcedCheck: { ok: false, detail: 'self-test forced failure' } });
-  const l = await startRun({ mode: 'LIVE', confirmText: 'LIVE' }, { forcedCheck: { ok: false, detail: 'self-test forced failure' } });
-  st.refused = !t.ok && !l.ok && /working AI/.test(t.error) && /working AI/.test(l.error) && !child;
+  const t = await startRun({ mode: 'TEST', only: '123456789012' }, { forcedCheck: { gemini: { ok: false, reason: 'self-test forced failure' }, groq: { ok: false, reason: 'self-test forced failure' } } });
+  const l = await startRun({ mode: 'LIVE', confirmText: 'LIVE' }, { forcedCheck: { gemini: { ok: false, reason: 'self-test forced failure' }, groq: { ok: false, reason: 'self-test forced failure' } } });
+  st.refused = !t.ok && !l.ok && /working AI provider/.test(t.error) && /working AI provider/.test(l.error) && !child;
   const r = await startRun({ mode: 'DRY' });
   if (!r.ok) selftestDone(false, r.error);
 }

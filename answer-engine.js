@@ -1,21 +1,22 @@
 /**
- * Answers application questions in Node — the page never holds the API key or the CV.
+ * Answers application questions in Node — the page never holds an API key or the CV.
  *
- *   answer({question, options, numeric, job}, {facts, apiKey, model, fetchImpl})
- *     → {status: 'answered', answer, evidence, source}
+ *   answer({question, options, numeric, job}, {facts, ai})
+ *     → {status: 'answered', answer, evidence, source, ai?}
  *     | {status: 'unknown', category, missing}        (never a made-up fallback)
  *
  * Order: direct factual lookup from the user's own data (only non-empty values), then
- * Gemini with an explicit "unknown" option. Every Gemini answer is validated here:
- * options must be returned verbatim, numeric answers must be numbers, and an answer
- * without evidence is treated as unknown.
+ * the AI chain (ai-providers.js: Gemini, then Groq) with an explicit "unknown" option.
+ * Every AI answer — whichever provider produced it — goes through validate(): options
+ * must be returned verbatim, numeric answers must be numbers, no evidence = unknown.
  *
- * Categories: unanswerable-question · missing-info · ai-error (transient: the runner
- * records FAILED, not SKIPPED, so the job is retried later).
+ * Categories: unanswerable-question · missing-info (→ SKIPPED) · ai-error (transient,
+ * → FAILED, retried later) · ai-daily-limit (no provider left today → the run stops).
  *
- *   node answer-engine.js --check      verify GEMINI_KEY + GEMINI_MODEL actually respond
+ *   node answer-engine.js --check      test Gemini and Groq separately
  */
-const DEFAULT_MODEL = 'gemini-2.5-flash';
+const { GEMINI_DEFAULT_MODEL, createAi, aiConfig } = require('./ai-providers');
+const DEFAULT_MODEL = GEMINI_DEFAULT_MODEL;
 const DEFAULT_WORK_AUTH = 'Authorized to work in my country of residence.'; // config.js default, not user data
 
 /**
@@ -37,11 +38,26 @@ function buildFacts(cv = {}) {
   return f;
 }
 
-/** Contact/identity details go to the model only when the question is about them. */
-const SENSITIVE = { email: /e-?mail/i, phone: /phone|mobile|contact/i, dateOfBirth: /birth|dob|\bage\b/i, gender: /gender|sex\b/i };
+/**
+ * Only the facts a question needs go to the AI. Professional facts (skills, history,
+ * education, …) are the default context; contact, personal, pay, notice and location
+ * facts are included only when the question is about them.
+ */
+const GROUPS = [
+  [['email', 'phone'], /e-?mail|phone|mobile|contact/i],
+  [['dateOfBirth'], /birth|dob|age/i],
+  [['gender'], /gender|sex/i],
+  [['currentCTC_lakhs', 'expectedCTC_lakhs'], /ctc|salary|compensation|pay|package|lakh|lpa/i],
+  [['noticePeriod'], /notice|join|start|availab/i],
+  [['location', 'willingToRelocate', 'preferredWorkModes', 'preferredLocations'], /locat|relocat|city|based|remote|hybrid|office|on-?site|commute|shift to|move to/i],
+  [['workAuthorization'], /visa|sponsor|authori[sz]|citizen|right to work|permit/i],
+  [['name'], /name/i],
+];
+const GATED = new Set(GROUPS.flatMap(([keys]) => keys));
 function relevantFacts(facts, question) {
-  const out = { ...facts };
-  for (const [k, re] of Object.entries(SENSITIVE)) if (!re.test(question)) delete out[k];
+  const out = {};
+  for (const [k, v] of Object.entries(facts)) if (!GATED.has(k)) out[k] = v; // professional context
+  for (const [keys, re] of GROUPS) if (re.test(question)) for (const k of keys) if (k in facts) out[k] = facts[k];
   return out;
 }
 
@@ -102,41 +118,15 @@ function buildPrompt({ question, options, numeric, job }, facts) {
 }
 
 /**
- * One Gemini JSON call (shared by answers, resume extraction and matching).
- * → {ok: true, json} | {ok: false, error}. Never throws. Key in a header, never the URL.
+ * One question to the AI chain. Never throws; failures come back as unknown with
+ * ai-error (transient) or ai-daily-limit (nothing usable today), never a fallback answer.
  */
-async function askJson(prompt, { apiKey, model = DEFAULT_MODEL, fetchImpl = globalThis.fetch, timeoutMs = 25000 } = {}) {
-  if (!apiKey) return { ok: false, error: 'GEMINI_KEY is empty' };
-  let text;
-  try {
-    const res = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model || DEFAULT_MODEL)}:generateContent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0, responseMimeType: 'application/json' },
-      }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return { ok: false, error: `Gemini HTTP ${res.status}: ${String(data?.error?.message || '').slice(0, 160)}` };
-    text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
-  } catch (e) {
-    return { ok: false, error: `Gemini call failed: ${String(e.message || e).slice(0, 160)}` };
-  }
-  try { return { ok: true, json: JSON.parse(text.replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, '')) }; }
-  catch (e) { return { ok: false, error: 'Gemini returned non-JSON' }; }
-}
-
-/** One question to Gemini. Never throws; errors come back as unknown/ai-error. */
-async function askGemini(q, facts, opts = {}) {
-  // A missing key is a configuration problem, not a question a human must answer: it
-  // is ai-error (→ FAILED, retryable), never SKIPPED. TEST/LIVE refuse to start without
-  // a working key anyway (checkModel + safety.aiPreflight).
-  if (!opts.apiKey) return { status: 'unknown', category: 'ai-error', missing: 'GEMINI_KEY is empty' };
-  const res = await askJson(buildPrompt(q, facts), opts);
-  if (!res.ok) return { status: 'unknown', category: 'ai-error', missing: res.error };
-  return validate(res.json, q);
+async function askAi(q, facts, ai) {
+  if (!ai) return { status: 'unknown', category: 'ai-error', missing: 'no AI provider configured' };
+  const res = await ai.askJson(buildPrompt(q, facts), { purpose: 'answer' });
+  if (!res.ok) return { status: 'unknown', category: res.kind === 'daily-limit' ? 'ai-daily-limit' : 'ai-error', missing: res.error };
+  const v = validate(res.json, q); // the SAME validation for every provider
+  return v.status === 'answered' ? { ...v, ai: { provider: res.provider, model: res.model } } : v;
 }
 
 /** Enforce the contract on whatever the model said. Anything off-contract is unknown. */
@@ -161,7 +151,7 @@ function validate(out, { options = [], numeric = false } = {}) {
 }
 
 /** Full pipeline for one question from the page. */
-async function answer(q, { facts = {}, apiKey = '', model = DEFAULT_MODEL, fetchImpl } = {}) {
+async function answer(q, { facts = {}, ai = null } = {}) {
   const question = String(q?.question || '').trim();
   const options = Array.isArray(q?.options) ? q.options.map((o) => String(o).trim()).filter(Boolean) : [];
   if (!question) return { status: 'unknown', category: 'unexpected-behaviour', missing: 'no question text could be read' };
@@ -169,29 +159,22 @@ async function answer(q, { facts = {}, apiKey = '', model = DEFAULT_MODEL, fetch
   const req = { question, options, numeric, job: q?.job || {} };
   const fact = factLookup(question, facts, { numeric });
   if (fact && (!options.length || options.includes(fact.answer))) return fact;
-  return askGemini(req, relevantFacts(facts, question), { apiKey, model, fetchImpl });
+  return askAi(req, relevantFacts(facts, question), ai);
 }
 
-/**
- * Does the configured key + model actually answer? The single check used by
- * `node answer-engine.js --check`, the runner before TEST/LIVE, and the app.
- */
-async function checkModel({ apiKey, model = DEFAULT_MODEL, fetchImpl } = {}) {
-  if (!apiKey) return { ok: false, detail: 'GEMINI_KEY is empty in .env' };
-  const r = await askJson('Connectivity check. Reply with exactly this JSON and nothing else: {"ok":true}',
-    { apiKey, model, fetchImpl, timeoutMs: 20000 });
-  if (!r.ok) return { ok: false, detail: `${model}: ${r.error}` };
-  return r.json && r.json.ok === true ? { ok: true, detail: `${model} responded` }
-    : { ok: false, detail: `${model} responded, but not with the expected JSON` };
-}
+module.exports = { DEFAULT_MODEL, buildFacts, relevantFacts, factLookup, validate, askAi, answer, buildPrompt };
 
-module.exports = { DEFAULT_MODEL, buildFacts, relevantFacts, factLookup, validate, askJson, askGemini, answer, buildPrompt, checkModel };
-
-// node answer-engine.js --check : one tiny real call to prove the key + model respond
+// node answer-engine.js --check : each provider tested on its own (no fallback)
 if (require.main === module && process.argv.includes('--check')) {
-  const { geminiKey, geminiModel } = require('./config');
-  checkModel({ apiKey: geminiKey, model: geminiModel || DEFAULT_MODEL }).then((r) => {
-    console.log(`${r.ok ? 'OK' : 'FAILED'} — ${r.detail}`);
-    process.exit(r.ok ? 0 : 1);
+  const ai = createAi(aiConfig(require('./config')));
+  ai.check().then((r) => {
+    for (const [name, x] of Object.entries(r)) {
+      console.log(`${name.padEnd(6)} ${x.ok ? 'WORKS' : 'FAILS'} — model ${x.model || '(none)'} — ${x.reason}`);
+      if (x.limits) console.log(`       remaining limits: ${typeof x.limits === 'string' ? x.limits : JSON.stringify(x.limits)}`);
+      if (x.models) console.log(`       models this key can use: ${x.models.join(', ')}`);
+    }
+    const n = Object.values(r).filter((x) => x.ok).length;
+    console.log(n === 2 ? 'Both providers work.' : n === 1 ? 'WARNING: only one provider works — no fallback.' : 'No provider works: TEST/LIVE will refuse to start.');
+    process.exit(n ? 0 : 1);
   });
 }

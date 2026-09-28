@@ -24,6 +24,7 @@ button.danger { color: var(--bad); border-color: #efc2c2; }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
 .card, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
 .card .v { font-size: 26px; font-weight: 700; margin-top: 4px; }
+.card .v.small { font-size: 18px; }
 .card.ok .v { color: var(--ok); } .card.warn .v { color: var(--warn); } .card.bad .v { color: var(--bad); }
 .k { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 600; }
 .big-text { font-size: 18px; margin-top: 4px; }

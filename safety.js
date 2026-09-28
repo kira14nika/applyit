@@ -44,14 +44,20 @@ const BENIGN = /Target page, context or browser has been closed|Target closed|Ex
 const isBenignRace = (e) => BENIGN.test(String((e && (e.stack || e.message)) || e));
 
 /**
- * TEST and LIVE may only start when the AI check passed (a real Apply click can lead to
- * a questionnaire; without working AI every such job would fail). DRY never clicks, so
- * it may run without a key. `check` is the result of answer-engine checkModel().
+ * TEST and LIVE may only start when at least one AI provider passed its check (a real
+ * Apply click can lead to a questionnaire). Only one working → start, with a warning
+ * (no fallback). DRY never clicks, so it may run without any key.
+ * `checks` is ai-providers check(): {gemini: {ok, reason, model}, groq: {…}}.
  */
-function aiPreflight(mode, check) {
+function aiPreflight(mode, checks) {
   if (mode === 'DRY') return { ok: true };
-  if (check && check.ok === true) return { ok: true };
-  return { ok: false, reason: `${mode} needs working AI answers — ${(check && check.detail) || 'check not run'}. Fix .env, then run: node answer-engine.js --check` };
+  const entries = Object.entries(checks || {});
+  const working = entries.filter(([, c]) => c && c.ok === true).map(([n]) => n);
+  const why = entries.map(([n, c]) => `${n}: ${(c && c.reason) || 'not checked'}`).join('; ') || 'check not run';
+  if (!working.length) return { ok: false, reason: `${mode} needs a working AI provider — ${why}. Fix .env, then run: node answer-engine.js --check` };
+  const broken = entries.filter(([, c]) => !(c && c.ok === true));
+  return { ok: true, working,
+    warning: broken.length ? `only ${working.join(', ')} works (${broken.map(([n, c]) => `${n}: ${(c && c.reason) || 'not checked'}`).join('; ')}) — no fallback if it hits a limit` : null };
 }
 
 module.exports = { parseMode, mayClick, isBenignRace, aiPreflight };

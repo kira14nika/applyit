@@ -42,6 +42,19 @@ test('app → runner flags: DRY default, TEST validated, LIVE only with the type
   assert.throws(() => runnerArgs({ mode: 'YOLO' }), /unknown mode/);
 });
 
+test('AI calls today per provider (history ai-call records, local day)', () => {
+  const now = new Date();
+  const h = [
+    { type: 'ai-call', ts: now.toISOString(), ok: true, provider: 'gemini', usage: { total: 15 } },
+    { type: 'ai-call', ts: now.toISOString(), ok: true, provider: 'groq', usage: { total: 26 } },
+    { type: 'ai-call', ts: now.toISOString(), ok: true, provider: 'gemini', usage: { total: null } },
+    { type: 'ai-call', ts: now.toISOString(), ok: false, provider: null },
+    { type: 'ai-call', ts: new Date(now.getTime() - 3 * 86400000).toISOString(), ok: true, provider: 'groq' },
+    { type: 'job', ts: now.toISOString() },
+  ];
+  assert.deepStrictEqual(D.aiCallsToday(h, now), { gemini: 2, groq: 1, failed: 1, tokens: { gemini: 15, groq: 26 } });
+});
+
 test('job details: all ledger lines in order, history, category', () => {
   const j = D.jobDetails({ ledger, history, deferred }, '3');
   assert.strictEqual(j.category, 'SKIPPED');

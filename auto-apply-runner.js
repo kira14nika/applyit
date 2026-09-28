@@ -220,6 +220,10 @@ const historyAppend = (rec) => {
   if (!run) return;
   try { history.append({ runId: RUN_ID, mode: MODE, ...rec }); } catch (e) { log('history write failed: ' + e.message); }
 };
+// The AI chain (Gemini → Groq). Every call — answer, match — is recorded in history as
+// {type:'ai-call', provider, model, usage, retries, fallbackReason, …}.
+const { createAi, aiConfig } = require('./ai-providers');
+const AI = run ? createAi(aiConfig(require('./config')), { onCall: (c) => historyAppend({ type: 'ai-call', ...c }) }) : null;
 // Structured states (run-events.js): an EventEmitter, mirrored to process.send when forked.
 const { createBus, createTracker, PAGE_STATES } = require('./run-events');
 const bus = run ? createBus({ runId: RUN_ID, mode: MODE }) : null;
@@ -288,10 +292,11 @@ function buildInjection(max = TARGET) {
 (async () => {
   // TEST/LIVE: refuse unless the AI check passes — before any prompt and before Chrome starts.
   if (site.ledger && MODE !== 'DRY' && !LOGIN_MODE) {
-    const check = await answerEngine.checkModel({ apiKey: geminiKey, model: geminiModel || answerEngine.DEFAULT_MODEL });
-    const pf = aiPreflight(MODE, check);
+    const checks = await AI.check();
+    const pf = aiPreflight(MODE, checks);
     if (!pf.ok) { log(`Refusing ${MODE}: ${pf.reason}`); process.exit(1); }
-    log(`AI check passed: ${check.detail}`);
+    log(`AI check passed: ${pf.working.map((n) => `${n} (${checks[n].model})`).join(', ')}`);
+    if (pf.warning) log(`⚠ ${pf.warning}`);
   }
   // LIVE needs an explicit second yes: --confirm-live, or typing LIVE at an interactive prompt.
   if (MODE === 'LIVE' && !LOGIN_MODE && !POLICY.confirmed) {
@@ -419,15 +424,17 @@ function buildInjection(max = TARGET) {
       log('▶ resumed');
       emit('resumed', { text: 'resumed where it left off' });
     },
-    stop() {
+    stop(reason = '') {
       if (stopRequested) return;
       stopRequested = true;
+      stopReason = reason;
       if (paused) { paused = false; pausedTotal += Date.now() - pausedAt; }
-      log(`⏹ stop requested${jobInFlight ? ' — waiting for the current job to be recorded' : ''}`);
-      emit('stopped', { text: jobInFlight ? 'stopping after the current job is recorded' : 'stopping' });
+      log(`⏹ stop${reason ? ` — ${reason}` : ' requested'}${jobInFlight ? ' — waiting for the current job to be recorded' : ''}`);
+      emit('stopped', { text: `${reason ? reason + ' — ' : ''}${jobInFlight ? 'stopping after the current job is recorded' : 'stopping'}` });
       if (!jobInFlight) closeForStop();
     },
   };
+  let stopReason = '';
   if (typeof process.send === 'function') {
     process.on('message', (m) => { if (m && m.type === 'control' && control[m.action]) control[m.action](); });
     process.on('disconnect', () => control.stop()); // the app went away: stop cleanly
@@ -684,7 +691,9 @@ function buildInjection(max = TARGET) {
   async function onAnswer(source, q) {
     const jid = String(q?.job?.id || '');
     tracker?.event(jid, 'generating-answer', { question: q?.question || '', options: q?.options || [] });
-    const res = await answerEngine.answer(q, { facts: FACTS, apiKey: geminiKey, model: geminiModel || answerEngine.DEFAULT_MODEL });
+    const res = await answerEngine.answer(q, { facts: FACTS, ai: AI });
+    // no provider left today: the job in flight is recorded (FAILED, retryable), then the run stops
+    if (res.category === 'ai-daily-limit') control.stop('AI daily limits reached');
     log(res.status === 'answered'
       ? `  💬 answered (${res.source}) from ${String(res.evidence).slice(0, 60)}`
       : `  ❔ unknown (${res.category}): ${String(res.missing).slice(0, 100)}`);
@@ -752,8 +761,9 @@ function buildInjection(max = TARGET) {
         : `match ${m.score}% (${m.source}) — ${m.decision}${m.belowThreshold ? ' — below your threshold (advisory only, still processed)' : ''}` });
     };
     record(jobMatch.applyThreshold(jobMatch.ruleMatch(job, FACTS, PREFS), PREFS));
-    if (geminiKey) {
-      pendingMatch.set(jid, jobMatch.aiMatch(job, FACTS, PREFS, { apiKey: geminiKey, model: geminiModel || answerEngine.DEFAULT_MODEL })
+    // AI matching spends AI quota: only when the Setup setting "AI matching" is on (default OFF)
+    if (AI && PREFS && PREFS.matching && PREFS.matching.aiEnabled) {
+      pendingMatch.set(jid, jobMatch.aiMatch(job, FACTS, PREFS, { ai: AI })
         .then((m) => record(jobMatch.applyThreshold(m, PREFS))).catch(() => {}).finally(() => pendingMatch.delete(jid)));
     }
   }
@@ -1049,7 +1059,7 @@ function buildInjection(max = TARGET) {
   }
 
   log(`Finished: ${submitted}/${TARGET} applications ${LIVE ? 'submitted' : 'simulated (dry run)'}.`);
-  const endReason = stopRequested ? 'stopped by the user' : testDone ? 'all TEST jobs reached an outcome' : submitted >= TARGET ? 'run target reached'
+  const endReason = stopRequested ? (stopReason || 'stopped by the user') : testDone ? 'all TEST jobs reached an outcome' : submitted >= TARGET ? 'run target reached'
     : searchesExhausted ? 'all searches exhausted' : pastDeadline() ? 'time limit reached' : 'browser restarts exhausted';
   emit(stopRequested ? 'stopped' : 'completed', { counts: counts(), text: endReason, errors: surfacedErrors, final: true });
   // forked by the app: the open IPC channel would keep this process alive

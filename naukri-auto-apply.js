@@ -372,8 +372,10 @@
       hadQuestionnaire = true;
       const res = await handleChatbot(doc(), job);
       if (res !== true) {
-        // a transient AI failure is retryable (FAILED); everything else needs a human (SKIPPED)
+        // AI failures are retryable (FAILED); everything else needs a human (SKIPPED)
         if (res.category === 'ai-error') { why = `questionnaire-stage: ai-error: ${res.missing}`; return false; }
+        // AI quota gone for the day: retryable FAILED, not a questionnaire failure (no cap), and the runner stops
+        if (res.category === 'ai-daily-limit') { why = `ai-daily-limit: ${res.missing}`; return false; }
         intervention = res;
         return 'skipped';
       }

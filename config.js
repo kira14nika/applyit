@@ -60,10 +60,12 @@ const CV = {
 
 const CREDS = { email: g('GOOGLE_EMAIL') || g('EMAIL'), password: g('GOOGLE_PASSWORD') };
 const geminiKey = g('GEMINI_KEY');
-const geminiModel = g('GEMINI_MODEL'); // empty → answer-engine.js DEFAULT_MODEL
+const geminiModel = g('GEMINI_MODEL'); // empty → ai-providers.js GEMINI_DEFAULT_MODEL
+const groqKey = g('GROQ_API_KEY');
+const groqModel = g('GROQ_MODEL');     // no default: must be a model your Groq key lists
 const naukriProfileUrl = g('NAUKRI_PROFILE_URL', 'https://www.naukri.com/mnjuser/profile');
 // The PDF uploaded to the Naukri profile and attached to external application forms.
 // Relative names resolve against the repo folder; an absolute path is used as-is.
 const resumePath = path.resolve(__dirname, g('RESUME_FILE', 'Ankit Baghel.pdf'));
 
-module.exports = { CV, CREDS, geminiKey, geminiModel, naukriProfileUrl, resumePath };
+module.exports = { CV, CREDS, geminiKey, geminiModel, groqKey, groqModel, naukriProfileUrl, resumePath };

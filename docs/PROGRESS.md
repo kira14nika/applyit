@@ -163,6 +163,51 @@ counts untouched) and its wiring. App self-test: TEST and LIVE are refused when 
 check fails (forced failure — cannot start a run even with a real key), plus the DRY
 pause/resume/stop run.
 
+## AI layer: Gemini primary, Groq fallback ✅
+
+One module, `ai-providers.js` — two transports and one chain; every AI caller (answers,
+resume extraction, optional matching) uses `ai.askJson()`, and validation stays above it
+so no provider can bypass it (options verbatim, numeric, evidence required, resume
+grounding filter, match skill grounding).
+
+| Rule | Behaviour |
+|---|---|
+| Gemini 503/5xx/timeout | one retry after 3 s, then Groq |
+| Gemini 429 | wait + one retry if Retry-After/RetryInfo < 10 s, else Groq |
+| Gemini DAILY quota (QuotaFailure `…PerDay…`) | Gemini unavailable until midnight Pacific, persisted in `ai-state.json` (git-ignored) → straight to Groq, also in later runs |
+| Groq 429/503/5xx/timeout | up to 2 retries, waiting Retry-After / `x-ratelimit-reset-*` / exponential; a wait > 20 s ends the attempt |
+| Groq daily limit (RPD/TPD or remaining-requests 0) | Groq unavailable until its reported reset |
+| 400/401/403/404 either provider | config error, never retried, provider disabled for the process, request falls through |
+| Both unusable because of daily limits | `ai-daily-limit` → the job is a retryable FAILED (not counted toward the questionnaire cap) and the run stops cleanly: state Stopped, reason "AI daily limits reached" |
+| Both transiently failing | `ai-error` → FAILED (retryable), as before |
+
+- Models: Gemini default `gemini-3.5-flash-lite` (verified responding 2026-09-28; your
+  `.env` sets `gemini-3.8-flash`, also verified). Groq has **no default** — `GROQ_MODEL`
+  must be a model your key lists; `--check` prints the list when it is missing or 404s.
+- `node answer-engine.js --check` tests each provider separately: works/fails + reason,
+  model, remaining limits (Groq rate headers; Gemini doesn't report them). TEST/LIVE
+  start if at least one works, with a warning when only one does (runner and app).
+- AI matching is rules-only by default; Setup → "AI matching (uses AI quota)", default OFF.
+- Only question-relevant facts are sent: professional context by default; contact, DOB,
+  gender, pay, notice, location and work-authorization facts only when the question is
+  about them.
+- Every AI call is written to history as `type:'ai-call'` (purpose, provider, model,
+  tokens, retries, fallback reason, attempts; app-side calls tagged `mode:'SETUP'`).
+  Dashboard: "AI calls today — Gemini N · Groq M" + provider status.
+
+Tests: `ai-providers.test.js` (18, mocked transports): Gemini ok; 503→retry ok; 503×2→Groq;
+timeout→Groq; 429 short wait vs long→Groq; Gemini daily→Groq rest of day, persisted, back
+after the Pacific reset; both daily→`daily-limit` (+ runner stop wiring); both transient;
+404/401/403 never retried; Groq retries honour headers; Groq daily reset; invalid option
+from Groq rejected; numeric/evidence rules on Groq; unknown from either → SKIPPED path;
+`check()` lists Groq models; duration + Pacific-midnight helpers (PDT/PST); relevant-facts
+filter. Older tests migrated to the chain. 83 total, all passing. App self-test passes
+(TEST/LIVE refused when no provider works).
+
+Verified for real: `node answer-engine.js --check` → gemini WORKS (gemini-3.8-flash),
+groq FAILS (GROQ_API_KEY not set) → "only one provider works". DRY run made 0 AI calls.
+Not verified: Groq against the real API (no key), a real Gemini daily-quota response.
+
 ## What's left
 See the final report and [CONTROLLED-TEST.md](CONTROLLED-TEST.md). Nothing in this
 build clicked Apply: TEST and LIVE are implemented and unit-tested but have not been run.

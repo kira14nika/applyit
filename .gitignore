@@ -10,6 +10,7 @@ naukri-deferred.jsonl
 naukri-history.jsonl
 profile.json
 preferences.json
+ai-state.json
 *.png
 
 # saved browser sessions (contain logged-in cookies)

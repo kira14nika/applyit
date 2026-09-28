@@ -12,12 +12,14 @@ Run it yourself, watching. Budget ~15 minutes.
 ## 0. Before you start
 
 1. **No other run is active** (the app's Running page is idle, no `auto-apply-runner` in Task Manager).
-2. **A working Gemini key is required.** TEST (and LIVE) refuse to start without one. Add
-   `GEMINI_KEY=…` (and optionally `GEMINI_MODEL=…`) to `.env`, then check it:
+2. **At least one working AI provider is required** (Gemini primary, Groq fallback). TEST
+   (and LIVE) refuse to start otherwise. Set `GEMINI_KEY`/`GEMINI_MODEL` and ideally
+   `GROQ_API_KEY`/`GROQ_MODEL` in `.env`, then:
    ```bash
    node answer-engine.js --check
    ```
-   You want `OK — <model> responded`.
+   Each provider is reported as WORKS/FAILS with its model and remaining limits. With only
+   one working you get a warning — the run can start but has no fallback.
 3. **Fill in Setup** (`npm run app` → Setup): load and review your resume profile, and the
    application facts (notice period, CTC, date of birth, gender, work authorization, current
    location; relocation and work mode under Job preferences). Each field shows whether its

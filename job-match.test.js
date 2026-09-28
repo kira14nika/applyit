@@ -8,7 +8,9 @@ const job = { title: 'Data Analyst', location: 'Pune', experience: '1 - 4 years'
   description: 'We need SQL and Power BI dashboards. Tableau is a plus.' };
 const facts = { skills: 'SQL, Power BI, Excel', totalExperience: '3' };
 const prefs = P.normalize({ locations: ['Pune'], titles: ['Data Analyst'] });
-const gemini = (obj) => async () => ({ ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(obj) }] } }] }) });
+const gemini = (obj) => async () => ({ ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(obj) }] } }] }), headers: { get: () => null } });
+const { createAi } = require('./ai-providers');
+const chain = (fetchImpl) => createAi({ gemini: { apiKey: 'k', model: 'm' } }, { fetchImpl, stateFile: null, sleep: async () => {} });
 
 test('rules: matched/missing come only from real text; score and reasons', () => {
   const m = M.ruleMatch(job, facts, prefs);
@@ -26,24 +28,26 @@ test('rules: no profile skills → unknown, not a guess', () => {
 });
 
 test('AI: invented skills are removed; off-contract output falls back to rules', async () => {
-  const m = await M.aiMatch(job, facts, prefs, { apiKey: 'k', fetchImpl: gemini({
+  const m = await M.aiMatch(job, facts, prefs, { ai: chain(gemini({
     score: 88, decision: 'good-match', reasons: ['Strong SQL'],
     matchedSkills: ['SQL', 'Kubernetes'], // Kubernetes is in neither text
     missingSkills: ['Tableau', 'Excel'],  // Excel is not asked by the job AND the candidate has it
-  }) });
+  })) });
   assert.strictEqual(m.source, 'ai');
   assert.strictEqual(m.score, 88);
   assert.deepStrictEqual(m.matchedSkills, ['SQL']);
   assert.deepStrictEqual(m.missingSkills, ['Tableau']);
-  const bad = await M.aiMatch(job, facts, prefs, { apiKey: 'k', fetchImpl: gemini({ score: 140 }) });
+  const bad = await M.aiMatch(job, facts, prefs, { ai: chain(gemini({ score: 140 })) });
   assert.strictEqual(bad.source, 'rules');
   assert.ok(bad.aiError);
-  const down = await M.aiMatch(job, facts, prefs, { apiKey: 'k', fetchImpl: async () => { throw new Error('offline'); } });
+  const down = await M.aiMatch(job, facts, prefs, { ai: chain(async () => { throw new Error('offline'); }) });
   assert.strictEqual(down.source, 'rules');
 });
 
-test('threshold defaults OFF and only flags — there is no reject decision', () => {
-  assert.deepStrictEqual(P.normalize({}).matching, { thresholdEnabled: false, threshold: 60 });
+test('AI matching and the threshold both default OFF; the threshold only flags', () => {
+  assert.deepStrictEqual(P.normalize({}).matching, { aiEnabled: false, thresholdEnabled: false, threshold: 60 });
+  const runner = require('fs').readFileSync(require('path').join(__dirname, 'auto-apply-runner.js'), 'utf8');
+  assert.ok(runner.includes('if (AI && PREFS && PREFS.matching && PREFS.matching.aiEnabled) {'), 'no AI call for matching unless the setting is on');
   const low = { score: 30, decision: 'weak-match' };
   assert.strictEqual(M.applyThreshold(low, P.normalize({})).belowThreshold, false, 'off → no flag');
   const flagged = M.applyThreshold(low, P.normalize({ matching: { thresholdEnabled: true, threshold: 50 } }));

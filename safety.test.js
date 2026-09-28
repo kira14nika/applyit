@@ -60,22 +60,26 @@ test('the page script asks the click gate before its click sequence', () => {
   assert.ok(/if \(!allowed\) \{ log\(.*\); return 'denied'; \}/.test(src), 'denied must return without clicking');
 });
 
-test('AI preflight: DRY runs without a key; TEST and LIVE refuse unless the check passed', () => {
-  const failed = { ok: false, detail: 'GEMINI_KEY is empty in .env' };
-  assert.strictEqual(aiPreflight('DRY', failed).ok, true);
+test('AI preflight: DRY runs without AI; TEST/LIVE need at least one working provider, warning with only one', () => {
+  const none = { gemini: { ok: false, reason: 'GEMINI_KEY is not set' }, groq: { ok: false, reason: 'GROQ_API_KEY is not set' } };
+  const one = { gemini: { ok: true, reason: 'responded' }, groq: { ok: false, reason: 'GROQ_API_KEY is not set' } };
+  const both = { gemini: { ok: true, reason: 'responded' }, groq: { ok: true, reason: 'responded' } };
+  assert.strictEqual(aiPreflight('DRY', none).ok, true);
   assert.strictEqual(aiPreflight('DRY', undefined).ok, true);
   for (const mode of ['TEST', 'LIVE']) {
-    assert.strictEqual(aiPreflight(mode, failed).ok, false);
-    assert.match(aiPreflight(mode, failed).reason, /GEMINI_KEY is empty.*answer-engine\.js --check/);
+    assert.strictEqual(aiPreflight(mode, none).ok, false);
+    assert.match(aiPreflight(mode, none).reason, /gemini: GEMINI_KEY is not set; groq: GROQ_API_KEY is not set.*answer-engine\.js --check/);
     assert.strictEqual(aiPreflight(mode, undefined).ok, false, 'no check = refuse');
-    assert.strictEqual(aiPreflight(mode, { ok: true, detail: 'm responded' }).ok, true);
+    const p1 = aiPreflight(mode, one);
+    assert.deepStrictEqual([p1.ok, p1.working], [true, ['gemini']]);
+    assert.match(p1.warning, /only gemini works.*groq: GROQ_API_KEY is not set/);
+    assert.deepStrictEqual([aiPreflight(mode, both).ok, aiPreflight(mode, both).warning], [true, null]);
   }
 });
-
 test('runner: the AI preflight runs before the LIVE prompt and before Chrome launches', () => {
   const src = fs.readFileSync(path.join(__dirname, 'auto-apply-runner.js'), 'utf8');
   const body = src.slice(src.indexOf('(async () => {'));
-  const pre = body.indexOf('aiPreflight(MODE, check)');
+  const pre = body.indexOf('aiPreflight(MODE, checks)');
   assert.ok(pre > 0, 'preflight present');
   assert.ok(pre < body.indexOf("rl.question('Type LIVE"), 'before the LIVE prompt');
   assert.ok(pre < body.indexOf('await launch()'), 'before launching Chrome');

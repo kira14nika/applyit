@@ -17,9 +17,12 @@ const FACTS = E.buildFacts(CV);
 /** A fetch that returns `body` as Gemini's JSON text and records the request. */
 const geminiReturns = (obj, calls = []) => async (url, init) => {
   calls.push({ url, init });
-  return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(obj) }] } }] }) };
+  return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(obj) }] } }] }), headers: { get: () => null } };
 };
-const ask = (q, fetchImpl, apiKey = 'test-key') => E.answer(q, { facts: FACTS, apiKey, model: 'm', fetchImpl });
+const { createAi } = require('./ai-providers');
+// the real provider chain (Gemini only here), transport mocked, no waiting
+const ask = (q, fetchImpl, apiKey = 'test-key') => E.answer(q, { facts: FACTS,
+  ai: apiKey ? createAi({ gemini: { apiKey, model: 'm' } }, { fetchImpl, stateFile: null, sleep: async () => {} }) : null });
 
 test('facts: only the user\'s own non-empty data; derived sentences and defaults dropped', () => {
   assert.ok(!('remoteOk' in FACTS) && !('relocate' in FACTS), 'derived sentences are not facts');
@@ -91,21 +94,11 @@ test('API errors → unknown/ai-error, never a fallback answer', async () => {
   assert.ok(!('answer' in http) && !('answer' in thrown) && !('answer' in junk));
 });
 
-test('no API key → ai-error (retryable FAILED), never a human-needed SKIPPED; no request made', async () => {
+test('no AI provider → ai-error (retryable FAILED), never a human-needed SKIPPED; no request made', async () => {
   const calls = [];
   const r = await ask({ question: 'Describe a project' }, geminiReturns({}, calls), '');
   assert.deepStrictEqual([r.status, r.category], ['unknown', 'ai-error']);
   assert.strictEqual(calls.length, 0);
-});
-
-test('checkModel: ok only when the model returns the expected JSON', async () => {
-  assert.deepStrictEqual((await E.checkModel({ apiKey: '' })).ok, false);
-  assert.match((await E.checkModel({ apiKey: '' })).detail, /GEMINI_KEY is empty/);
-  assert.strictEqual((await E.checkModel({ apiKey: 'k', model: 'm', fetchImpl: geminiReturns({ ok: true }) })).ok, true);
-  assert.strictEqual((await E.checkModel({ apiKey: 'k', model: 'm', fetchImpl: geminiReturns({ ok: 'yes' }) })).ok, false);
-  const bad = await E.checkModel({ apiKey: 'bad', model: 'm', fetchImpl: async () => ({ ok: false, status: 400, json: async () => ({ error: { message: 'API key not valid' } }) }) });
-  assert.strictEqual(bad.ok, false);
-  assert.match(bad.detail, /400.*API key not valid/);
 });
 
 test('the page script holds no answers, no CV and no key', () => {

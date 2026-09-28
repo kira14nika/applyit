@@ -4,11 +4,11 @@
  * defaults to OFF; even when on it only flags `belowThreshold`, it does not gate.)
  *
  *   ruleMatch(job, facts, prefs)            deterministic, offline, always available
- *   aiMatch(job, facts, prefs, {apiKey…})   Gemini; every skill it names is checked
+ *   aiMatch(job, facts, prefs, {ai})        the AI chain, only when the "AI matching" setting
+ *                                           is on (default OFF); every skill it names is checked
  *                                           against the job text and the profile, and
  *                                           anything off-contract falls back to rules
  */
-const { askJson } = require('./answer-engine');
 
 const low = (s) => String(s || '').toLowerCase();
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -64,10 +64,10 @@ const PROMPT = [
 /** AI match with every claim checked. Falls back to the rule result on anything off-contract. */
 async function aiMatch(job, facts = {}, prefs = null, opts = {}) {
   const base = ruleMatch(job, facts, prefs);
-  if (!opts.apiKey) return base;
+  if (!opts.ai) return base;
   const candidate = { skills: facts.skills, employmentHistory: facts.employmentHistory, education: facts.education,
     certifications: facts.certifications, projects: facts.projects, totalExperience: facts.totalExperience, currentRole: facts.currentRole };
-  const res = await askJson(`${PROMPT}\n\n${JSON.stringify({ CANDIDATE: candidate, JOB: job, PREFERENCES: prefs ? { locations: prefs.locations, workModes: prefs.workModes, experience: prefs.experience, salary: prefs.salary } : {} })}`, opts);
+  const res = await opts.ai.askJson(`${PROMPT}\n\n${JSON.stringify({ CANDIDATE: candidate, JOB: job, PREFERENCES: prefs ? { locations: prefs.locations, workModes: prefs.workModes, experience: prefs.experience, salary: prefs.salary } : {} })}`, { purpose: 'match' });
   if (!res.ok) return { ...base, aiError: res.error };
   const o = res.json || {};
   const score = Number(o.score);
@@ -78,7 +78,7 @@ async function aiMatch(job, facts = {}, prefs = null, opts = {}) {
   const missing = (Array.isArray(o.missingSkills) ? o.missingSkills : []).map(String).filter((s) => mentions(text, s) && !mentions(cand, s));
   const reasons = (Array.isArray(o.reasons) ? o.reasons : []).map(String).filter(Boolean).slice(0, 5);
   const decision = ['good-match', 'partial-match', 'weak-match'].includes(o.decision) ? o.decision : decide(score);
-  return { score: Math.round(score), decision, matchedSkills: matched, missingSkills: missing, reasons, source: 'ai', rules: { score: base.score, decision: base.decision } };
+  return { score: Math.round(score), decision, matchedSkills: matched, missingSkills: missing, reasons, source: 'ai', ai: { provider: res.provider, model: res.model }, rules: { score: base.score, decision: base.decision } };
 }
 
 /** The threshold only FLAGS (advisory); it never returns a reject/skip decision. */

@@ -110,7 +110,10 @@ function renderSnapshot(s, ev) {
   }
   setControls();
 }
-api.onEvent((m) => renderSnapshot(m.snapshot, m.event));
+api.onEvent((m) => {
+  renderSnapshot(m.snapshot, m.event);
+  if (['generating-answer', 'ai-matching', 'application-verified', 'skipped', 'failed', 'stopped', 'completed'].includes(m.event.state)) api.dashboard().then(renderAi);
+});
 api.onLog((line) => {
   const log = $('log');
   log.textContent += line + '\n';
@@ -123,8 +126,16 @@ api.onExit(({ code }) => {
   syncMode(); setControls(); refreshDashboard();
 });
 
+function renderAi(d) {
+  const a = d.aiToday || {};
+  $('dash-ai').textContent = `Gemini ${a.gemini || 0} · Groq ${a.groq || 0}`;
+  const s = d.aiStatus || {};
+  const notes = Object.entries(s).map(([n, x]) => !x.configured ? `${n}: not configured` : x.dailyUntil ? `${n}: daily limit until ${new Date(x.dailyUntil).toLocaleTimeString()}` : `${n}: ${x.model}`);
+  $('dash-ai-note').textContent = [a.failed ? `${a.failed} failed` : '', ...notes].filter(Boolean).join(' · ');
+}
 async function refreshDashboard() {
   const d = await api.dashboard();
+  renderAi(d);
   running = d.running;
   if (d.snapshot) renderSnapshot(d.snapshot);
   else { $('dash-today').textContent = `${d.today} / ${d.dailyCap}`; $('cur-today').textContent = `${d.today} / ${d.dailyCap}`; $('dash-run').textContent = `0 / ${d.perRun}`; }
