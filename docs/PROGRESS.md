@@ -318,6 +318,14 @@ Never touches naukri-ledger.jsonl, naukri-deferred.jsonl, profile.json, preferen
 longer used for anything, so there is no file to archive.
 - Tests: `fix-round.test.js` (11). Full suite 113 pass.
 
+### Fixes found by the bounded DRY run ✅
+- Last results page: Naukri keeps a greyed-out "Next" (`<a disabled>`, no href). It was
+  clicked, which led to a blank page, 30 s waits and browser restarts until the time cap.
+  Now it counts as "last page" and the search ends.
+- A finished or empty search now moves on in ~1.5 s, not at the next 45 s supervisor tick.
+  Empty pages get their own per-page row. The match score is also written to the text log.
+- `--prefs=<file>`: DRY-test a search from another preferences file without editing Setup.
+
 ## What's left
 See the final report and [CONTROLLED-TEST.md](CONTROLLED-TEST.md). Nothing in this
 build clicked Apply: TEST and LIVE are implemented and unit-tested but have not been run.

@@ -131,3 +131,13 @@ test('H: reset archives test data and never touches ledger/deferred/profile/pref
   assert.ok(fs.readFileSync(path.join(__dirname, '.gitignore'), 'utf8').split(/\r?\n/).includes('archive/'));
   assert.match(fs.readFileSync(path.join(__dirname, 'app/main.js'), 'utf8'), /NEVER touched: \$\{R\.PROTECTED\.join/);
 });
+
+test('G: an empty page is summarised and a finished search rotates without a 45 s wait', () => {
+  assert.match(PAGE, /emit\('page-summary', \{ text: 'no results'/);
+  assert.match(RUNNER, /await nap\(searchDone \? 1500 : 45000\)/);
+  assert.match(RUNNER, /load\(PREFS_ARG \|\| undefined\)/);
+});
+
+test('pagination: a disabled "Next" on the last page ends the search', () => {
+  assert.match(PAGE, /nb && !nb\.hasAttribute\('disabled'\) && !\(nb\.tagName === 'A' && !nb\.getAttribute\('href'\)\)/);
+});

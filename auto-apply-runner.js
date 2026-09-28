@@ -165,7 +165,9 @@ if (MODE === 'TEST' && !site.ledger) { console.log(`Usage error: --test is only 
 
 // Setup (preferences.json / profile.json), Naukri only. Without them the built-in
 // searches and the .env CV are used exactly as before.
-const PREFS = site.ledger ? require('./preferences').load() : null;
+// --prefs=<file>: read preferences from another file (DRY testing a search without editing Setup)
+const PREFS_ARG = (process.argv.find((a) => a.startsWith('--prefs=')) || '').slice(8);
+const PREFS = site.ledger ? require('./preferences').load(PREFS_ARG || undefined) : null;
 const PROFILE = site.ledger ? require('./resume-profile').load() : null;
 if (PREFS) {
   const searches = require('./preferences').buildSearches(PREFS);
@@ -399,7 +401,7 @@ function buildInjection(max = TARGET) {
   if (run) log(`Ledger: ${run.today}/${DAILY_CAP} APPLIED today, ${run.excluded.size} job ids permanently excluded` +
     (EXTERNAL_ON ? '' : ' — company-site applies paused until they are ledger-recorded'));
   if (run && deferredIds.size) log(`Deferred company-site jobs excluded: ${deferredIds.size}`);
-  if (run) log(`Setup: ${PREFS ? `preferences.json (${site.searches.length} searches, limits ${site.perRun}/run ${site.dailyCap}/day)` : 'no preferences.json — built-in searches'}; ` +
+  if (run) log(`Setup: ${PREFS ? `${PREFS_ARG || 'preferences.json'} (${site.searches.length} searches, limits ${site.perRun}/run ${site.dailyCap}/day)` : 'no preferences.json — built-in searches'}; ` +
     `answers from ${PROFILE ? 'profile.json' : 'no profile yet (Setup)'} + application facts` +
     (() => { const env = require('./resume-profile').applicationFacts(PROFILE, PREFS, CV).sources.filter((s) => s.source === 'env').map((s) => s.label);
       return env.length ? ` (from .env: ${env.join(', ')})` : ''; })());
@@ -776,8 +778,10 @@ function buildInjection(max = TARGET) {
       if (AI && MATCH_PREFS.matching.aiEnabled) m = await jobMatch.aiMatch(job, FACTS, MATCH_PREFS, { ai: AI });
       m = jobMatch.applyThreshold(m, MATCH_PREFS);
       tracker.touch(jid, { match: m });
-      tracker.event(jid, 'ai-matching', { match: m, text: m.score == null ? 'match unknown (no profile skills) — not gated'
-        : `match ${m.score}% (${m.source})${m.belowThreshold ? ` — below ${m.threshold}%: not applying` : ''}` });
+      const text = m.score == null ? 'match unknown (no profile skills) — not gated'
+        : `match ${m.score}% (${m.source})${m.belowThreshold ? ` — below ${m.threshold}%: not applying` : ''}`;
+      log(`  🎯 ${text}`);
+      tracker.event(jid, 'ai-matching', { match: m, text });
       if (!m.belowThreshold) return { ok: true, score: m.score };
       return { ok: false, reason: `low-match: ${m.score}% (${m.source === 'ai' ? 'ai' : 'rules'})`,
         match: { score: m.score, source: m.source, threshold: m.threshold, matchedSkills: m.matchedSkills, missingSkills: m.missingSkills } };
@@ -841,7 +845,8 @@ function buildInjection(max = TARGET) {
         // A Next click is real progress; let the reload inject at once instead of
         // waiting out the 20s throttle and the next 45s supervisor tick.
         if (/🌐 Next results page/.test(clean)) { pageAdvanced = true; lastInject = 0; }
-        if (/No more pages/.test(clean)) searchDone = true;
+        // wake the supervisor (it naps 45 s) once the page script has finished, instead of idling
+        if (/No more pages/.test(clean)) { searchDone = true; setTimeout(() => { if (wake) wake(); }, 1500); }
       }
 
       const ext = clean.match(/🔗 EXTERNAL \| (.+) \| (\S+)/);
@@ -975,7 +980,7 @@ function buildInjection(max = TARGET) {
   // Supervisor: re-inject the search tab when idle, close finished form tabs,
   // rotate searches on inactivity, stop on target/time.
   while (submitted < TARGET && !pastDeadline() && !testDone && !stopRequested) {
-    await nap(45000);
+    await nap(searchDone ? 1500 : 45000); // a finished search rotates at once, not after a 45 s tick
 
     const pages = ctx.pages();
     let anyBusy = false;

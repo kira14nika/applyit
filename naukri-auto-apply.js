@@ -492,6 +492,8 @@
   if (cardsState === 'empty') {
     // an empty search is finished, not broken: the runner moves on to the next search
     log('(this page: 0 cards — Naukri says "No results found" for this search)');
+    emit('page-summary', { text: 'no results', page: location.href,
+      counts: { seen: 0, titleFiltered: 0, excluded: 0, locationFiltered: 0, duplicates: 0, opened: 0 } });
     log('No more pages. Change your search and paste again.');
     return;
   }
@@ -580,7 +582,9 @@
       // visited on an earlier run vs jobs the title filter rejected. Reporting a
       // combined "0 match" made an exhausted page look like a broken filter.
       log(`(this page: ${cards.length} cards — ${nSeen} excluded (applied/skipped/tried), ${nFiltered} title-filtered, ${nLoc} location-filtered, ${last.duplicates} duplicates, ${openedOnPage} opened; sample: ${sample})`);
-      const nextBtn = findButtonByText(document, SELECTORS.nextPageText);
+      // the last page keeps a greyed-out "Next" (<a disabled> without href, measured 2026-09-28)
+      const nb = findButtonByText(document, SELECTORS.nextPageText);
+      const nextBtn = nb && !nb.hasAttribute('disabled') && !(nb.tagName === 'A' && !nb.getAttribute('href')) ? nb : null;
       pageSummary(nextBtn ? 'next page' : 'last page');
       if (nextBtn) {
         log('🌐 Next results page — the page will reload. PASTE THE SCRIPT AGAIN when it loads.');
