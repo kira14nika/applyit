@@ -232,6 +232,43 @@ filtering), `--check` output shows the listing error, parse cases (fences, `<thi
 surrounding prose, last object wins, no JSON, arrays rejected), Groq `reasoning` field
 ignored + reasoning tokens recorded, Gemini thought parts ignored.
 
+## Setup redesign + "Needs your answer" inbox ✅
+
+**Setup = 3 required steps** (under 2 minutes): 1) resume PDF → auto-extract, shown as a
+compact read-only summary with an "Edit details" button (removed/ungrounded values in a
+short collapsible list); 2) job titles + keywords, pre-filled from the resume's
+current/recent titles and first skills (`suggestPreferences`, resume-only); 3) locations,
+pre-filled from the current/resume city, plus "Any location" / "Remote is fine" → Save.
+Everything else (application facts with their .env-fallback hints, hybrid/on-site,
+relocation, salary, experience, exclude words, limits) sits under a collapsed
+"More details (optional)". Setup and Settings each save only their part (merged).
+
+**Inbox** (`question-inbox.js`, Dashboard + nav badge): SKIPPED jobs whose question
+couldn't be answered truthfully (missing-info / unanswerable-question) are grouped —
+identical/near-identical wording (normalised, token Jaccard ≥ 0.8), and only with the same
+option set. The user answers once (option questions: the original options as buttons) →
+`profile.json answeredByYou` (source "answered by you"), or "Don't answer this" →
+`dontAnswer`. "Forget" undoes either. Previously SKIPPED jobs stay SKIPPED — the ledger is
+never touched; only future jobs use the answer.
+
+**Answer engine**: "don't answer" → unknown straight away (job keeps being skipped, no AI
+call); a saved answer is used only if the SAME `validate()` accepts it for this question
+(option verbatim, numeric); saved answers are also given to the AI as facts. Saving the
+Setup profile never drops the inbox answers (`keepInbox`).
+
+**Settings > Advanced**: "AI matching" and "Match threshold", each with a one-line
+explanation; both default Off (a user's saved choice is kept).
+
+Tests: `question-inbox.test.js` (7): grouping (wording variants, option sets, categories,
+same job once), saving (validation, source, leaves the inbox, ledger untouched), saved
+answer used by the engine (text + option, numeric mismatch not forced), saved answers
+reach the AI as facts, "don't answer" keeps skipping without an AI call + answer/forget,
+Setup pre-fill from the resume, runner/app wiring. 95 total, all passing. App self-test
+(PASS) now also checks: Setup's 3 steps with "More details" collapsed, the inbox badge,
+Settings > Advanced collapsed; captures include a display-only inbox sample.
+
+Note: with "AI matching" on, DRY runs also spend AI quota (one request per job).
+
 ## What's left
 See the final report and [CONTROLLED-TEST.md](CONTROLLED-TEST.md). Nothing in this
 build clicked Apply: TEST and LIVE are implemented and unit-tested but have not been run.

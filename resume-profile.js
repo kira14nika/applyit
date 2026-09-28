@@ -197,4 +197,25 @@ function strip(o) {
   return o;
 }
 
-module.exports = { PROFILE, APP_FACTS, extractPdfText, grounded, groundProfile, buildProfile, load, save, applicationFacts, factsFor };
+/**
+ * Setup pre-fill from the resume (the user only confirms): current/recent job titles,
+ * the first skills as keywords, the city from the current/resume location. Everything
+ * comes from the profile itself — nothing is suggested that the resume doesn't say.
+ */
+function suggestPreferences(profile) {
+  if (!profile) return { titles: [], keywords: [], locations: [] };
+  const jobs = [...(profile.jobs || [])].sort((a, b) =>
+    Number(/present|current|now|till date/i.test(b.end || '')) - Number(/present|current|now|till date/i.test(a.end || '')));
+  const seen = new Set();
+  const titles = [];
+  for (const j of jobs) {
+    const t = String(j.title || '').trim();
+    if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); titles.push(t); }
+    if (titles.length === 3) break;
+  }
+  const keywords = [...new Set((profile.skills || []).map((s) => String(s).trim()).filter(Boolean))].slice(0, 5);
+  const loc = String((profile.userProvided && profile.userProvided.currentLocation) || profile.location || '').split(',')[0].trim();
+  return { titles, keywords, locations: loc ? [loc] : [] };
+}
+
+module.exports = { PROFILE, APP_FACTS, suggestPreferences, extractPdfText, grounded, groundProfile, buildProfile, load, save, applicationFacts, factsFor };

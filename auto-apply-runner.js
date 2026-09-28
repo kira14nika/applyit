@@ -691,7 +691,9 @@ function buildInjection(max = TARGET) {
   async function onAnswer(source, q) {
     const jid = String(q?.job?.id || '');
     tracker?.event(jid, 'generating-answer', { question: q?.question || '', options: q?.options || [] });
-    const res = await answerEngine.answer(q, { facts: FACTS, ai: AI });
+    // the user's inbox answers / "don't answer" choices (profile.json), used like other facts
+    const res = await answerEngine.answer(q, { facts: FACTS, ai: AI,
+      saved: PROFILE ? { answeredByYou: PROFILE.answeredByYou || [], dontAnswer: PROFILE.dontAnswer || [] } : null });
     // no provider left today: the job in flight is recorded (FAILED, retryable), then the run stops
     if (res.category === 'ai-daily-limit') control.stop('AI daily limits reached');
     log(res.status === 'answered'

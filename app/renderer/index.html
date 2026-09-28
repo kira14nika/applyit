@@ -9,7 +9,7 @@
 <body>
   <aside class="nav">
     <div class="brand">ApplyIt <span class="platform">Naukri</span></div>
-    <button class="nav-btn active" data-page="dashboard">Dashboard</button>
+    <button class="nav-btn active" data-page="dashboard">Dashboard <span id="nav-inbox" class="nav-badge hidden">0</span></button>
     <button class="nav-btn" data-page="setup">Setup</button>
     <button class="nav-btn" data-page="running">Running</button>
     <button class="nav-btn" data-page="applications">Applications</button>
@@ -45,6 +45,12 @@
         <div id="dash-phase" class="big-text">Not running</div>
         <div class="k" style="margin-top:12px">Last result</div>
         <div id="dash-last">—</div>
+      </div>
+      <div class="panel inbox" id="inbox-panel">
+        <div class="inbox-head"><h2>Needs your answer <span id="inbox-count" class="badge-count">0</span></h2>
+          <span class="note">Questions ApplyIt couldn't answer truthfully. Answer once — it's used for all future jobs. Jobs already skipped stay skipped.</span></div>
+        <div id="inbox-list"></div>
+        <details id="inbox-done" class="hidden"><summary id="inbox-done-sum">Answered by you</summary><div id="inbox-done-list"></div></details>
       </div>
       <p class="note">Run and Applied count only NEW applications that ApplyIt submitted and then verified by reloading the job. Already-applied jobs are shown separately and never counted.</p>
     </section>
@@ -150,9 +156,18 @@
         <label class="check"><input type="checkbox" id="show-browser"> Show the browser window during runs (debug)</label>
         <p class="note">The mode resets to DRY every time ApplyIt starts. Limits: at most 10 verified new applications per run, 50 per day.</p>
       </div>
+      <details class="panel advanced" id="advanced">
+        <summary><b>Advanced</b></summary>
+        <label class="check"><input type="checkbox" id="adv-aimatch"> <b>AI matching</b></label>
+        <p class="note">Scores each job against your resume with AI (one AI request per job, uses your AI quota). Off: a free local score is used instead.</p>
+        <label class="check"><input type="checkbox" id="adv-thr-on"> <b>Match threshold</b> <input id="adv-thr" type="number" min="0" max="100" style="width:70px"> %</label>
+        <p class="note">Marks jobs scoring below this number. It only flags them — no job is skipped because of its score.</p>
+        <button id="adv-save">Save advanced settings</button> <span id="adv-status" class="muted"></span>
+      </details>
     </section>
   </main>
   <script src="setup.js"></script>
+  <script src="inbox.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

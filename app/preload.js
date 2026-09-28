@@ -18,6 +18,12 @@ contextBridge.exposeInMainWorld('applyit', {
     savePrefs: (p) => ipcRenderer.invoke('setup:savePrefs', p),
     previewSearches: (p) => ipcRenderer.invoke('setup:previewSearches', p),
   },
+  inbox: {
+    list: () => ipcRenderer.invoke('inbox:list'),
+    answer: (key, answer) => ipcRenderer.invoke('inbox:answer', { key, answer }),
+    dont: (key) => ipcRenderer.invoke('inbox:dont', { key }),
+    forget: (key) => ipcRenderer.invoke('inbox:forget', { key }),
+  },
   onEvent: (cb) => ipcRenderer.on('run:event', (_e, m) => cb(m)),
   onLog: (cb) => ipcRenderer.on('run:log', (_e, line) => cb(line)),
   onExit: (cb) => ipcRenderer.on('run:exit', (_e, x) => cb(x)),

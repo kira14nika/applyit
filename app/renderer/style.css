@@ -68,3 +68,34 @@ textarea, #live-confirm, .panel input[type=text], .panel input:not([type]), .pan
 .kvtable td:first-child { color: var(--muted); white-space: nowrap; }
 .form-row { display: grid; grid-template-columns: 180px 1fr; gap: 8px 14px; align-items: start; margin: 6px 0; }
 .form-row label { color: var(--muted); padding-top: 8px; }
+/* Setup (3 steps) */
+.step { display: flex; gap: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 12px; }
+.step-n { flex: none; width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: #fff; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.step-body { flex: 1; min-width: 0; }
+.step-body h3 { margin: 2px 0 8px; font-size: 16px; }
+.summary { border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin: 10px 0 6px; display: grid; gap: 4px; }
+.summary-name { font-size: 16px; font-weight: 700; }
+.chips-ro { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
+.chip-ro { background: #eef2fb; color: #2a3d6b; border-radius: 10px; padding: 1px 8px; font-size: 12px; }
+details.dropped, details.more { margin: 6px 0; }
+details.dropped summary, details.more summary, details.advanced summary, #inbox-done summary { cursor: pointer; color: var(--muted); }
+details.more { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin-bottom: 12px; }
+details.more summary { font-weight: 600; color: var(--text); }
+.panel.inner { margin-top: 8px; }
+.save-bar { display: flex; align-items: center; gap: 12px; margin: 4px 0 20px; }
+button.big { padding: 10px 26px; font-size: 15px; }
+button.link { border: 0; background: none; color: var(--accent); padding: 4px 0; }
+.check.inline { display: inline-block; margin: 8px 16px 0 0; }
+.pair { display: flex; gap: 8px; } .pair input { max-width: 150px; }
+/* Inbox */
+.nav-badge { background: var(--bad); color: #fff; border-radius: 9px; padding: 0 6px; font-size: 11px; font-weight: 700; margin-left: 4px; }
+.inbox { margin-top: 12px; }
+.inbox-head h2 { font-size: 16px; margin: 0 0 2px; }
+.badge-count { background: var(--bad); color: #fff; border-radius: 10px; padding: 1px 8px; font-size: 12px; vertical-align: middle; }
+.badge-count.zero { background: #d9dde6; color: #555; }
+.q-item { border-top: 1px solid var(--line); padding: 10px 0; }
+.q-text { font-weight: 600; }
+.q-meta { color: var(--muted); font-size: 12.5px; margin: 2px 0 6px; }
+.q-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.q-actions input { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; min-width: 260px; }
+.q-error { color: var(--bad); font-size: 12.5px; }

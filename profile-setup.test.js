@@ -124,8 +124,10 @@ test('Setup collects every required application fact', () => {
   const keys = R.APP_FACTS.map((f) => f.key);
   for (const k of ['noticePeriod', 'currentCTC', 'expectedCTC', 'dateOfBirth', 'gender', 'workAuthorization', 'currentLocation']) assert.ok(keys.includes(k), k);
   const setup = fs.readFileSync(path.join(__dirname, 'app', 'renderer', 'setup.js'), 'utf8');
-  assert.ok(setup.includes('setupData.appFacts.map(factRow)'), 'form fields are generated from APP_FACTS');
-  assert.ok(setup.includes("chk('s-remote'") && setup.includes("h('select', { id: 's-reloc' }"), 'relocation + work modes in preferences');
+  assert.ok(setup.includes('data.appFacts.map((f) => row(f.label'), 'application-fact fields are generated from APP_FACTS (under More details)');
+  assert.ok(setup.includes("chk('s-remote'") && setup.includes("h('select', { id: 's-reloc' }"), 'relocation + work modes collected');
+  assert.ok(setup.includes("h('summary', { text: 'More details (optional)' })"), 'optional fields are collapsed');
+  assert.ok(!/s-aimatch|s-thr/.test(setup), 'AI matching + threshold moved to Settings > Advanced');
 });
 
 test('preferences: limits can be lowered, never raised; searches use only slug + experience', () => {

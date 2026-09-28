@@ -101,7 +101,9 @@ ipcMain.handle('data:dashboard', () => {
   const recs = ledger.load();
   return { running: !!child, mode: lastMode, snapshot: lastSnapshot, events: recentEvents.slice(-80),
     today: ledger.todayApplied(recs), dailyCap: 50, perRun: 10, excluded: ledger.excludedIds(recs).size,
-    aiToday: data.aiCallsToday(history.load()), aiStatus: makeAi().status() };
+    aiToday: data.aiCallsToday(history.load()), aiStatus: makeAi().status(),
+    inboxCount: require('../question-inbox').buildInbox(history.load(), (() => { const p = resumeProfile.load() || {};
+      return { answeredByYou: p.answeredByYou || [], dontAnswer: p.dontAnswer || [] }; })()).length };
 });
 ipcMain.handle('data:applications', () => data.buildApplications(files()));
 ipcMain.handle('data:job', (_e, id) => data.jobDetails(files(), String(id)));
@@ -144,6 +146,8 @@ ipcMain.handle('setup:load', () => {
     appFacts: resumeProfile.APP_FACTS.map(({ key, label }) => ({ key, label })),
     // where each application fact currently comes from (setup / resume / env / none)
     factSources: resumeProfile.applicationFacts(profile, prefs, cfg().CV).sources,
+    // pre-fill for the 3 required steps: titles / keywords / locations from the resume
+    suggestions: resumeProfile.suggestPreferences(profile),
   };
 });
 ipcMain.handle('setup:pickResume', async () => {
@@ -161,10 +165,40 @@ ipcMain.handle('setup:extract', async (_e, file) => {
     return { ok: true, ...r, profile: { ...r.profile, resumeFile: file, resumeText: text } };
   } catch (e) { return { ok: false, error: String(e.message || e) }; }
 });
-ipcMain.handle('setup:saveProfile', (_e, p) => ({ ok: true, profile: resumeProfile.save(sanitizeProfile(p)) }));
+// The inbox choices live in profile.json but are never edited by the Setup form: carry
+// them over on every profile save (sanitizeProfile would otherwise drop them).
+const keepInbox = (next) => {
+  const cur = resumeProfile.load() || {};
+  return { ...next, answeredByYou: cur.answeredByYou || [], dontAnswer: cur.dontAnswer || [] };
+};
+ipcMain.handle('setup:saveProfile', (_e, p) => ({ ok: true, profile: resumeProfile.save(keepInbox(sanitizeProfile(p))) }));
+// Setup and Settings each save only their part: merge into what's already saved
 ipcMain.handle('setup:savePrefs', (_e, p) => {
-  const saved = preferences.save(p);
+  const saved = preferences.save({ ...(preferences.load() || {}), ...(p || {}) });
   return { ok: true, prefs: saved, searches: preferences.buildSearches(saved) };
+});
+
+// ---------------------------------------------------------------- "Needs your answer" inbox
+const inbox = require('../question-inbox');
+const savedChoices = (p) => ({ answeredByYou: (p && p.answeredByYou) || [], dontAnswer: (p && p.dontAnswer) || [] });
+function inboxView() {
+  const p = resumeProfile.load();
+  return { open: inbox.buildInbox(history.load(), savedChoices(p)),
+    answered: savedChoices(p).answeredByYou, declined: savedChoices(p).dontAnswer };
+}
+function inboxUpdate(key, fn) {
+  const group = inbox.buildInbox(history.load(), savedChoices(resumeProfile.load())).find((g) => g.key === key);
+  if (!group) return { ok: false, error: 'this question is no longer in the inbox' };
+  try { resumeProfile.save(fn(resumeProfile.load() || {}, group)); } catch (e) { return { ok: false, error: e.message }; }
+  return { ok: true, ...inboxView() };
+}
+ipcMain.handle('inbox:list', () => inboxView());
+ipcMain.handle('inbox:answer', (_e, { key, answer } = {}) => inboxUpdate(String(key), (p, g) => inbox.saveAnswer(p, g, answer)));
+ipcMain.handle('inbox:dont', (_e, { key } = {}) => inboxUpdate(String(key), (p, g) => inbox.dontAnswer(p, g)));
+ipcMain.handle('inbox:forget', (_e, { key } = {}) => {
+  const p = resumeProfile.load();
+  if (p) resumeProfile.save(inbox.forget(p, String(key)));
+  return { ok: true, ...inboxView() };
 });
 ipcMain.handle('setup:previewSearches', (_e, p) => preferences.buildSearches(preferences.normalize(p)));
 
@@ -228,12 +262,15 @@ async function selftestOnExit(code) {
   // Setup path inside Electron: pdfjs extraction of the configured resume (read-only, length only)
   let resumeChars = null;
   try { const rf = cfg().resumePath; if (rf && fs.existsSync(rf)) resumeChars = (await resumeProfile.extractPdfText(rf)).length; } catch (e) { resumeChars = `error: ${e.message}`; }
-  ui.setupLoaded = await win.webContents.executeJavaScript("document.querySelector('.nav-btn[data-page=\"setup\"]').click(); new Promise(r => setTimeout(() => r(!!document.getElementById('profile-form')), 1500))").catch(() => false);
+  ui.setupLoaded = await win.webContents.executeJavaScript("document.querySelector('.nav-btn[data-page=\"setup\"]').click(); new Promise(r => setTimeout(() => r(!!(document.getElementById('s-titles') && document.getElementById('s-locs') && document.getElementById('setup-save') && document.querySelector('details#more:not([open])'))), 1500))").catch(() => false);
+  ui.inboxShown = await win.webContents.executeJavaScript("!!document.getElementById('inbox-count') && document.getElementById('inbox-count').textContent !== ''").catch(() => false);
+  ui.advancedDefaultsOff = await win.webContents.executeJavaScript("document.querySelector('.nav-btn[data-page=\"settings\"]').click(); new Promise(r => setTimeout(() => r(!!document.getElementById('advanced') && !document.getElementById('advanced').open), 800))").catch(() => false);
   ui.resumeChars = resumeChars;
   const need = ['starting', 'searching', 'checking-job', 'paused', 'resumed', 'stopped'];
   const missing = need.filter((s) => !st.seen.includes(s));
   const ok = code === 0 && !missing.length && /PAUSED/i.test(st.pausedUi || '') && /STOPPED/i.test(ui.state || '') && ui.events > 5
-    && ui.setupLoaded === true && (resumeChars === null || typeof resumeChars === 'number') && st.refused === true;
+    && ui.setupLoaded === true && ui.inboxShown === true && ui.advancedDefaultsOff === true
+    && (resumeChars === null || typeof resumeChars === 'number') && st.refused === true;
   ui.testLiveRefusedWithoutAi = st.refused;
   // --capture=<dir>: save a screenshot of each page (needs --show-window to render)
   const cap = (process.argv.find((a) => a.startsWith('--capture=')) || '').slice(10);
@@ -243,6 +280,19 @@ async function selftestOnExit(code) {
       await new Promise((r) => setTimeout(r, 1200));
       fs.writeFileSync(path.join(cap, `app-${p}.png`), (await win.webContents.capturePage()).toPNG());
     }
+    // display-only sample of the inbox (no history yet has skipped questions); nothing is saved
+    await win.webContents.executeJavaScript(`document.querySelector('.nav-btn[data-page="dashboard"]').click();`);
+    await new Promise((r) => setTimeout(r, 1500)); // let the real inbox load finish first
+    await win.webContents.executeJavaScript(`window.ApplyItInbox.render({ open: [
+        { key: 'a', question: 'Are you willing to work night shifts?', options: ['Yes', 'No'], missing: ['shift preference'], jobs: [{ jobId: '1', title: 'Data Analyst', company: 'Acme' }, { jobId: '2', title: 'BI Analyst', company: 'Beta' }] },
+        { key: 'b', question: 'How many years of experience do you have with Tableau?', options: [], missing: ['Tableau experience'], jobs: [{ jobId: '3', title: 'Data Analyst', company: 'Gamma' }] } ],
+        answered: [{ key: 'c', question: 'What is your notice period?', answer: '30 days' }], declined: [] });
+      document.getElementById('inbox-panel').scrollIntoView();`);
+    await new Promise((r) => setTimeout(r, 600));
+    fs.writeFileSync(path.join(cap, 'app-inbox-sample.png'), (await win.webContents.capturePage()).toPNG());
+    await win.webContents.executeJavaScript(`document.querySelector('.nav-btn[data-page="settings"]').click(); document.getElementById('advanced').open = true;`);
+    await new Promise((r) => setTimeout(r, 600));
+    fs.writeFileSync(path.join(cap, 'app-settings-advanced.png'), (await win.webContents.capturePage()).toPNG());
   }
   selftestDone(ok, JSON.stringify({ runnerExit: code, missing, pausedUi: st.pausedUi, ui, states: [...new Set(st.seen)] }));
 }

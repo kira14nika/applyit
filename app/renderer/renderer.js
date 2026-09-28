@@ -24,8 +24,9 @@ function show(page) {
   document.querySelectorAll('.nav-btn').forEach((b) => b.classList.toggle('active', b.dataset.page === page));
   if (page === 'applications') loadApplications();
   if (page === 'reports') loadReports();
-  if (page === 'dashboard') refreshDashboard();
+  if (page === 'dashboard') { refreshDashboard(); if (window.ApplyItInbox) window.ApplyItInbox.load(); }
   if (page === 'setup' && window.ApplyItSetup) window.ApplyItSetup.load();
+  if (page === 'settings') loadAdvanced();
 }
 document.querySelectorAll('.nav-btn').forEach((b) => b.addEventListener('click', () => show(b.dataset.page)));
 
@@ -245,5 +246,21 @@ async function loadReports() {
       Object.entries(x.outcomes).map(([k, v]) => `${k} ${v}`).join(', ')])));
 }
 
+// ---------------------------------------------------------------- Settings > Advanced (both default Off)
+async function loadAdvanced() {
+  const d = await api.setup.load();
+  const m = (d.prefs && d.prefs.matching) || { aiEnabled: false, thresholdEnabled: false, threshold: 60 };
+  $('adv-aimatch').checked = !!m.aiEnabled;
+  $('adv-thr-on').checked = !!m.thresholdEnabled;
+  $('adv-thr').value = m.threshold;
+  $('adv-status').textContent = '';
+}
+$('adv-save').onclick = async () => {
+  const r = await api.setup.savePrefs({ matching: { aiEnabled: $('adv-aimatch').checked, thresholdEnabled: $('adv-thr-on').checked, threshold: $('adv-thr').value } });
+  const m = r.prefs.matching;
+  $('adv-status').textContent = `Saved — AI matching ${m.aiEnabled ? 'on' : 'off'}, threshold ${m.thresholdEnabled ? m.threshold + '%' : 'off'}.`;
+};
+
 syncMode();
 refreshDashboard();
+if (window.ApplyItInbox) window.ApplyItInbox.load();

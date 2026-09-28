@@ -1,4 +1,5 @@
-/* ApplyIt Setup page: resume → reviewed profile, and preferences. textContent only. */
+/* ApplyIt Setup — 3 required steps (resume, job titles, locations), everything else optional.
+   Data is inserted with textContent only. */
 'use strict';
 (() => {
   const S = window.applyit.setup;
@@ -14,44 +15,46 @@
   const lines = (v) => String(v || '').split('\n').map((s) => s.trim()).filter(Boolean);
   const csv = (v) => String(v || '').split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
   const cells = (line, n) => { const c = line.split('|').map((s) => s.trim()); while (c.length < n) c.push(''); return c; };
-  let draft = null; // profile being edited (kept for resumeText / resumeFile)
-
   const row = (label, input) => h('div', { class: 'form-row' }, h('label', { text: label }), input);
-  const text = (id, value = '', ph = '') => h('input', { id, value, placeholder: ph });
+  const text = (id, value = '', ph = '') => h('input', { id, value: value == null ? '' : String(value), placeholder: ph });
   const area = (id, value = '', ph = '', rows = 3) => { const a = h('textarea', { id, placeholder: ph, rows: String(rows) }); a.value = value; return a; };
+  const chk = (id, label, on) => h('label', { class: 'check inline' }, (() => { const c = h('input', { type: 'checkbox', id }); c.checked = !!on; return c; })(), ' ' + label);
 
-  let setupData = { appFacts: [], factSources: [] };
-  /** "(empty → using .env: 30 days)" etc., from the last saved state. */
-  function sourceHint(key) {
-    const s = setupData.factSources.find((x) => x.key === key);
-    if (!s) return '';
-    if (s.source === 'setup') return 'saved in Setup';
-    if (s.source === 'resume') return `empty → using your resume: ${s.value}`;
-    if (s.source === 'env') return `empty → using .env: ${s.value}`;
-    return key === 'relocation' || key === 'workModes' ? 'not set — questions about this will need you (no .env fallback)'
-      : 'not set anywhere — questions about this will need you';
+  let data = null;   // setup:load result
+  let draft = null;  // profile being shown / edited (keeps resumeText, resumeFile)
+  let dirtyProfile = false;
+
+  // ---------------------------------------------------------------- step 1: resume summary
+  function summary(p) {
+    if (!p || (!p.name && !(p.skills || []).length && !(p.jobs || []).length)) {
+      return h('p', { class: 'muted', text: 'No resume yet — choose your resume PDF above.' });
+    }
+    const current = (p.jobs || []).find((j) => /present|current|now|till date/i.test(j.end || '')) || (p.jobs || [])[0];
+    const skills = [...(p.skills || []), ...(p.tools || [])];
+    return h('div', { class: 'summary' },
+      h('div', { class: 'summary-name', text: p.name || '(name not found)' }),
+      h('div', { class: 'muted', text: [p.email, p.phone, p.location].filter(Boolean).join(' · ') || 'no contact details found' }),
+      current ? h('div', {}, h('b', { text: 'Now: ' }), `${current.title || ''}${current.employer ? ' at ' + current.employer : ''}`) : null,
+      (p.jobs || []).length ? h('div', { class: 'muted', text: `Experience: ${(p.jobs || []).slice(0, 4).map((j) => `${j.title || ''}${j.employer ? ' @ ' + j.employer : ''}${j.start ? ` (${j.start}–${j.end || ''})` : ''}`).join(' · ')}` }) : null,
+      (p.education || []).length ? h('div', { class: 'muted', text: `Education: ${p.education.map((e) => [e.degree, e.institution, e.year].filter(Boolean).join(', ')).join(' · ')}` }) : null,
+      skills.length ? h('div', { class: 'chips-ro' }, skills.slice(0, 18).map((s) => h('span', { class: 'chip-ro', text: s })),
+        skills.length > 18 ? h('span', { class: 'muted', text: ` +${skills.length - 18} more` }) : null) : null,
+      (p.certifications || []).length ? h('div', { class: 'muted', text: `Certifications: ${p.certifications.join(' · ')}` }) : null);
   }
-  function profileForm(p) {
-    const u = p.userProvided || {};
-    const factRow = (f) => row(f.label, h('div', {}, text(`u-${f.key}`, u[f.key] || ''), h('div', { class: 'note', 'data-hint': f.key, text: sourceHint(f.key) })));
-    return h('div', {},
+  function editForm(p) {
+    return h('div', { id: 'edit-form', class: 'panel inner' },
       row('Name', text('p-name', p.name)), row('Email', text('p-email', p.email)), row('Phone', text('p-phone', p.phone)),
       row('Location', text('p-location', p.location)), row('Headline', text('p-headline', p.headline)),
       row('Skills', area('p-skills', (p.skills || []).join(', '), 'comma separated')),
-      row('Tools / software', area('p-tools', (p.tools || []).join(', '), 'comma separated')),
+      row('Tools / software', area('p-tools', (p.tools || []).join(', '), 'comma separated', 2)),
       row('Languages', text('p-languages', (p.languages || []).join(', '))),
       row('Jobs', area('p-jobs', (p.jobs || []).map((j) => [j.title, j.employer, j.start, j.end].join(' | ')).join('\n'), 'Title | Employer | Start | End  (one per line)', 4)),
-      row('Education', area('p-education', (p.education || []).map((e) => [e.degree, e.institution, e.year].join(' | ')).join('\n'), 'Degree | Institution | Year', 3)),
-      row('Certifications', area('p-certs', (p.certifications || []).join('\n'), 'one per line')),
-      row('Projects', area('p-projects', (p.projects || []).map((x) => [x.name, x.description].join(' | ')).join('\n'), 'Name | Description', 3)),
-      h('h3', { class: 'section-title', text: 'Application facts (not in a resume — used to answer questions)' }),
-      h('p', { class: 'note', text: 'Leave a field empty to fall back to the value in .env (shown under each field). Relocation and remote/hybrid/on-site are set under Job preferences below.' }),
-      setupData.appFacts.map(factRow),
-      row('Total experience (years)', text('u-totalExperienceYears', u.totalExperienceYears, 'e.g. 3')),
-      h('button', { class: 'primary', text: 'Save profile', onclick: saveProfile }), h('span', { id: 'p-status', class: 'muted', style: 'margin-left:10px' }));
+      row('Education', area('p-education', (p.education || []).map((e) => [e.degree, e.institution, e.year].join(' | ')).join('\n'), 'Degree | Institution | Year', 2)),
+      row('Certifications', area('p-certs', (p.certifications || []).join('\n'), 'one per line', 2)),
+      row('Projects', area('p-projects', (p.projects || []).map((x) => [x.name, x.description].join(' | ')).join('\n'), 'Name | Description', 2)),
+      h('button', { text: 'Done', onclick: () => { draft = readEdit(); dirtyProfile = true; renderResume(); } }));
   }
-
-  function readProfile() {
+  function readEdit() {
     return {
       ...(draft || {}),
       name: $('p-name').value, email: $('p-email').value, phone: $('p-phone').value, location: $('p-location').value, headline: $('p-headline').value,
@@ -60,102 +63,143 @@
       education: lines($('p-education').value).map((l) => { const [degree, institution, year] = cells(l, 3); return { degree, institution, year }; }),
       certifications: lines($('p-certs').value),
       projects: lines($('p-projects').value).map((l) => { const [name, ...d] = l.split('|'); return { name: name.trim(), description: d.join('|').trim() }; }),
-      userProvided: {
-        ...Object.fromEntries(setupData.appFacts.map((f) => [f.key, $(`u-${f.key}`).value])),
-        totalExperienceYears: $('u-totalExperienceYears').value,
-      },
     };
   }
-  async function saveProfile() {
-    const r = await S.saveProfile(readProfile());
-    draft = r.profile;
-    $('p-status').textContent = r.ok ? `Saved ${new Date(r.profile.savedAt).toLocaleTimeString()} — answers now come from this profile.` : 'Save failed';
-    if (r.ok) refreshHints();
+  function renderResume(dropped = null) {
+    const box = $('resume-box');
+    box.textContent = '';
+    box.append(summary(draft));
+    if (dropped && dropped.length) {
+      box.append(h('details', { class: 'dropped' }, h('summary', { text: `${dropped.length} value(s) removed because they are not written in your resume` }),
+        h('ul', {}, dropped.map((x) => h('li', { text: x })))));
+    }
+    box.append(h('button', { class: 'link', id: 'edit-btn', text: draft ? 'Edit details' : 'Enter details by hand',
+      onclick: () => { if (!$('edit-form')) box.append(editForm(draft || {})); } }));
   }
-
-  function prefsForm(p, max) {
-    const modes = p.workModes || [];
-    const chk = (id, label, on) => h('label', { class: 'check', style: 'display:inline-block;margin-right:14px' }, (() => { const c = h('input', { type: 'checkbox', id }); c.checked = !!on; return c; })(), ' ' + label);
-    const rel = h('select', { id: 's-reloc' }, ['unspecified', 'yes', 'no'].map((v) => { const o = h('option', { value: v, text: v }); if (v === p.relocation) o.selected = true; return o; }));
-    return h('div', {},
-      row('Job titles / search keywords', area('s-titles', (p.titles || []).join('\n'), 'one per line, e.g. Data Analyst', 3)),
-      row('Preferred locations', area('s-locs', (p.locations || []).join('\n'), 'one per line; leave empty for any location', 2)),
-      row('Work mode', h('div', {}, chk('s-remote', 'Remote', modes.includes('remote')), chk('s-hybrid', 'Hybrid', modes.includes('hybrid')), chk('s-onsite', 'On-site', modes.includes('on-site')),
-        h('div', { class: 'note', 'data-hint': 'workModes', text: sourceHint('workModes') }))),
-      row('Willing to relocate', h('div', {}, rel, h('div', { class: 'note', 'data-hint': 'relocation', text: sourceHint('relocation') }))),
-      row('Salary range (lakhs/yr)', h('div', {}, text('s-salmin', p.salary?.min ?? '', 'min'), text('s-salmax', p.salary?.max ?? '', 'max'))),
-      row('Experience range (years)', h('div', {}, text('s-expmin', p.experience?.min ?? '', 'min — also used as ?experience= in searches'), text('s-expmax', p.experience?.max ?? '', 'max'))),
-      row('Title must include (any)', area('s-incl', (p.includeKeywords || []).join('\n'), 'extra title words, one per line', 2)),
-      row('Title must NOT include', area('s-excl', (p.excludeKeywords || []).join('\n'), 'one per line (added to the built-in blocklist)', 2)),
-      row(`Max per run (≤ ${max.perRun})`, text('s-perrun', p.limits?.perRun ?? max.perRun)),
-      row(`Max per day (≤ ${max.daily})`, text('s-daily', p.limits?.daily ?? max.daily)),
-      row('AI matching (uses AI quota)', h('div', {}, chk('s-aimatch', 'Score jobs with AI', p.matching?.aiEnabled),
-        h('div', { class: 'note', text: 'Off by default: jobs are scored with local rules (no AI call). On: each job costs one AI request.' }))),
-      row('AI match threshold', h('div', {}, chk('s-thr-on', 'Flag jobs below', p.matching?.thresholdEnabled), text('s-thr', p.matching?.threshold ?? 60),
-        h('div', { class: 'note', text: 'Off by default. Advisory only in this version: a low score is flagged in Running / Job Details, the job is never skipped because of it.' }))),
-      h('div', { class: 'k', style: 'margin-top:10px', text: 'Naukri searches that will be used' }), h('ul', { id: 's-searches', class: 'timeline' }),
-      h('button', { class: 'primary', text: 'Save preferences', onclick: savePrefs }), h('span', { id: 's-status', class: 'muted', style: 'margin-left:10px' }));
-  }
-  function readPrefs() {
-    return {
-      titles: lines($('s-titles').value), locations: lines($('s-locs').value),
-      workModes: [['s-remote', 'remote'], ['s-hybrid', 'hybrid'], ['s-onsite', 'on-site']].filter(([id]) => $(id).checked).map(([, m]) => m),
-      relocation: $('s-reloc').value,
-      salary: { min: $('s-salmin').value, max: $('s-salmax').value }, experience: { min: $('s-expmin').value, max: $('s-expmax').value },
-      includeKeywords: lines($('s-incl').value), excludeKeywords: lines($('s-excl').value),
-      limits: { perRun: $('s-perrun').value, daily: $('s-daily').value },
-      matching: { aiEnabled: $('s-aimatch').checked, thresholdEnabled: $('s-thr-on').checked, threshold: $('s-thr').value },
-    };
-  }
-  async function preview() {
-    const urls = await S.previewSearches(readPrefs());
-    const ul = $('s-searches'); ul.textContent = '';
-    if (!urls.length) ul.append(h('li', { class: 'muted', text: 'No titles yet — the built-in searches are used.' }));
-    for (const u of urls) ul.append(h('li', { text: u }));
-  }
-  async function savePrefs() {
-    const r = await S.savePrefs(readPrefs());
-    $('s-status').textContent = `Saved — limits ${r.prefs.limits.perRun}/run, ${r.prefs.limits.daily}/day; ${r.searches.length} searches.`;
-    $('s-perrun').value = r.prefs.limits.perRun; $('s-daily').value = r.prefs.limits.daily;
-    refreshHints();
+  async function chooseResume() {
+    const f = await S.pickResume(); if (!f) return;
+    $('r-status').textContent = 'Reading your resume…';
+    const r = await S.extract(f);
+    if (!r.ok) { $('r-status').textContent = `Could not read it: ${r.error}`; return; }
+    draft = { ...r.profile, userProvided: (data.profile && data.profile.userProvided) || {} };
+    dirtyProfile = true;
+    $('r-status').textContent = `Read (${r.ai}). Check the summary, confirm steps 2 and 3, then Save.`;
+    renderResume(r.dropped);
+    // re-suggest from the new resume unless the user already typed something
+    const sug = suggestFrom(draft);
+    if (!$('s-titles').dataset.touched) $('s-titles').value = sug.titles.join('\n');
+    if (!$('s-keywords').dataset.touched) $('s-keywords').value = sug.keywords.join(', ');
+    if (!$('s-locs').dataset.touched) $('s-locs').value = sug.locations.join('\n');
     preview();
   }
+  // same rule as resume-profile.js suggestPreferences(), for a freshly extracted draft
+  function suggestFrom(p) {
+    const cur = (j) => /present|current|now|till date/i.test(j.end || '');
+    const jobs = [...(p.jobs || [])].sort((a, b) => Number(cur(b)) - Number(cur(a)));
+    const titles = [...new Map(jobs.filter((j) => j.title).map((j) => [j.title.toLowerCase(), j.title])).values()].slice(0, 3);
+    const loc = String((p.userProvided && p.userProvided.currentLocation) || p.location || '').split(',')[0].trim();
+    return { titles, keywords: [...new Set(p.skills || [])].slice(0, 5), locations: loc ? [loc] : [] };
+  }
 
-  /** Re-read where each fact comes from without re-rendering (keeps unsaved edits). */
+  // ---------------------------------------------------------------- optional details
+  let sourcesByKey = {};
+  function hint(key) {
+    const s = sourcesByKey[key];
+    if (!s) return '';
+    if (s.source === 'setup') return 'saved';
+    if (s.source === 'resume') return `empty → from your resume: ${s.value}`;
+    if (s.source === 'env') return `empty → from .env: ${s.value}`;
+    return 'not set — job questions about this go to your "Needs your answer" inbox';
+  }
+  function moreDetails(p, prefs, max) {
+    const u = (p && p.userProvided) || {};
+    const modes = prefs.workModes || [];
+    const rel = h('select', { id: 's-reloc' }, ['unspecified', 'yes', 'no'].map((v) => { const o = h('option', { value: v, text: v }); if (v === prefs.relocation) o.selected = true; return o; }));
+    return h('details', { id: 'more', class: 'more' }, h('summary', { text: 'More details (optional)' }),
+      h('p', { class: 'note', text: 'Only needed when job questions ask for them — anything unanswered comes to your "Needs your answer" inbox instead. Empty fields fall back to .env.' }),
+      data.appFacts.map((f) => row(f.label, h('div', {}, text(`u-${f.key}`, u[f.key] || ''), h('div', { class: 'note', 'data-hint': f.key, text: hint(f.key) })))),
+      row('Total experience (years)', text('u-totalExperienceYears', u.totalExperienceYears, 'e.g. 3')),
+      row('Also OK', h('div', {}, chk('s-hybrid', 'Hybrid', modes.includes('hybrid')), chk('s-onsite', 'On-site', modes.includes('on-site')))),
+      row('Willing to relocate', rel),
+      row('Salary range (lakhs/yr)', h('div', { class: 'pair' }, text('s-salmin', prefs.salary && prefs.salary.min, 'min'), text('s-salmax', prefs.salary && prefs.salary.max, 'max'))),
+      row('Experience range (years)', h('div', { class: 'pair' }, text('s-expmin', prefs.experience && prefs.experience.min, 'min (also used in searches)'), text('s-expmax', prefs.experience && prefs.experience.max, 'max'))),
+      row('Title must NOT include', area('s-excl', (prefs.excludeKeywords || []).join('\n'), 'one per line (added to the built-in blocklist)', 2)),
+      row(`Max per run (≤ ${max.perRun})`, text('s-perrun', (prefs.limits && prefs.limits.perRun) || max.perRun)),
+      row(`Max per day (≤ ${max.daily})`, text('s-daily', (prefs.limits && prefs.limits.daily) || max.daily)));
+  }
+
+  // ---------------------------------------------------------------- save
+  function readPrefs() {
+    const modes = [$('s-remote').checked && 'remote', $('s-hybrid').checked && 'hybrid', $('s-onsite').checked && 'on-site'].filter(Boolean);
+    return {
+      titles: lines($('s-titles').value), includeKeywords: csv($('s-keywords').value),
+      locations: $('s-any').checked ? [] : lines($('s-locs').value), anyLocation: $('s-any').checked, workModes: modes,
+      relocation: $('s-reloc').value,
+      salary: { min: $('s-salmin').value, max: $('s-salmax').value }, experience: { min: $('s-expmin').value, max: $('s-expmax').value },
+      excludeKeywords: lines($('s-excl').value), limits: { perRun: $('s-perrun').value, daily: $('s-daily').value },
+    };
+  }
+  function readUserProvided() {
+    return { ...Object.fromEntries(data.appFacts.map((f) => [f.key, $(`u-${f.key}`).value])), totalExperienceYears: $('u-totalExperienceYears').value };
+  }
+  async function save() {
+    if ($('edit-form')) { draft = readEdit(); dirtyProfile = true; }
+    const prefs = readPrefs();
+    if (!prefs.titles.length) { $('save-status').textContent = 'Add at least one job title to search for (step 2).'; return; }
+    if (!prefs.anyLocation && !prefs.locations.length) { $('save-status').textContent = 'Add a location, or tick "Any location" (step 3).'; return; }
+    const up = readUserProvided();
+    const upChanged = Object.entries(up).some(([k, v]) => String(v || '') !== String(((data.profile || {}).userProvided || {})[k] || ''));
+    if (dirtyProfile || upChanged) await S.saveProfile({ ...(draft || {}), userProvided: up });
+    const r = await S.savePrefs(prefs);
+    dirtyProfile = false;
+    $('save-status').textContent = `Saved — ${r.searches.length} Naukri search${r.searches.length === 1 ? '' : 'es'}, limits ${r.prefs.limits.perRun}/run · ${r.prefs.limits.daily}/day.`;
+    refreshHints();
+  }
+  async function preview() {
+    const urls = await S.previewSearches({ titles: lines($('s-titles').value), experience: { min: $('s-expmin') ? $('s-expmin').value : '' } });
+    const ul = $('s-searches'); ul.textContent = '';
+    for (const u of urls) ul.append(h('li', { text: u }));
+    if (!urls.length) ul.append(h('li', { class: 'muted', text: 'Add a job title to create a search.' }));
+  }
   async function refreshHints() {
-    const d = await S.load();
-    setupData.factSources = d.factSources;
-    document.querySelectorAll('[data-hint]').forEach((n) => { n.textContent = sourceHint(n.dataset.hint); });
+    data = await S.load();
+    sourcesByKey = Object.fromEntries(data.factSources.map((s) => [s.key, s]));
+    document.querySelectorAll('[data-hint]').forEach((n) => { n.textContent = hint(n.dataset.hint); });
   }
 
   async function load() {
-    const d = await S.load();
-    setupData = d;
-    draft = d.profile || { userProvided: {} };
-    const root = $('setup-root'); root.textContent = '';
-    const status = h('div', { id: 'r-status', class: 'muted' });
-    const dropped = h('ul', { id: 'r-dropped', class: 'timeline' });
+    data = await S.load();
+    sourcesByKey = Object.fromEntries(data.factSources.map((s) => [s.key, s]));
+    draft = data.profile || null;
+    dirtyProfile = false;
+    const prefs = data.prefs || { limits: {} };
+    const sug = data.suggestions || { titles: [], keywords: [], locations: [] };
+    const has = (a) => Array.isArray(a) && a.length;
+    const root = $('setup-root');
+    root.textContent = '';
     root.append(
-      h('h3', { class: 'section-title', text: '1 · Resume' }),
-      h('p', { class: 'muted', text: d.hasKey ? `AI extraction uses ${d.model}. Only values found word-for-word in your resume are kept.` : 'GEMINI_KEY is not set in .env — the resume text is read, email/phone are found, and you fill in the rest.' }),
-      h('button', { text: 'Choose resume PDF…', onclick: async () => {
-        const f = await S.pickResume(); if (!f) return;
-        status.textContent = `Reading ${f} …`; dropped.textContent = '';
-        const r = await S.extract(f);
-        if (!r.ok) { status.textContent = `Could not read it: ${r.error}`; return; }
-        draft = { ...r.profile, userProvided: (d.profile && d.profile.userProvided) || {} };
-        status.textContent = `Read ${r.profile.resumeText.length} characters. AI: ${r.ai}. Review below, then Save profile.`;
-        for (const x of r.dropped) dropped.append(h('li', { text: `removed (not in resume): ${x}` }));
-        $('profile-form').replaceWith(Object.assign(profileForm(draft), { id: 'profile-form' }));
-      } }),
-      status, dropped,
-      h('h3', { class: 'section-title', text: '2 · Profile — review and edit' }),
-      d.profile ? h('p', { class: 'muted', text: `Saved ${new Date(d.profile.savedAt).toLocaleString()}${d.profile.resumeFile ? ' from ' + d.profile.resumeFile : ''}` })
-        : h('p', { class: 'muted', text: 'No profile yet — only the application facts below (Setup or .env) can be used to answer questions.' }),
-      Object.assign(profileForm(draft), { id: 'profile-form' }),
-      h('h3', { class: 'section-title', text: '3 · Job preferences' }),
-      prefsForm(d.prefs || { limits: {} }, d.max));
-    ['s-titles', 's-expmin'].forEach((id) => $(id).addEventListener('input', preview));
+      h('p', { class: 'muted', text: 'Three steps, about two minutes: your resume, the jobs to look for, and where.' }),
+      h('div', { class: 'step' }, h('div', { class: 'step-n', text: '1' }), h('div', { class: 'step-body' },
+        h('h3', { text: 'Your resume' }),
+        h('div', {}, h('button', { class: 'primary', text: draft ? 'Replace resume PDF…' : 'Choose resume PDF…', onclick: chooseResume }),
+          h('span', { id: 'r-status', class: 'muted', style: 'margin-left:10px', text: data.hasKey ? `Read by AI (${data.model}); only what is written in your resume is kept.` : 'No AI key: the text is read and email/phone found — use "Enter details by hand" for the rest.' })),
+        h('div', { id: 'resume-box' }))),
+      h('div', { class: 'step' }, h('div', { class: 'step-n', text: '2' }), h('div', { class: 'step-body' },
+        h('h3', { text: 'Jobs to look for' }),
+        h('p', { class: 'note', text: has(prefs.titles) ? 'Your saved titles.' : sug.titles.length ? 'Suggested from your resume — confirm or edit.' : 'One job title per line.' }),
+        area('s-titles', (has(prefs.titles) ? prefs.titles : sug.titles).join('\n'), 'e.g. Data Analyst', 3),
+        h('div', { class: 'k', style: 'margin-top:8px', text: 'Keywords (optional) — a job title may contain one of these instead' }),
+        text('s-keywords', (has(prefs.includeKeywords) ? prefs.includeKeywords : sug.keywords).join(', '), 'e.g. Power BI, SQL'),
+        h('div', { class: 'k', style: 'margin-top:8px', text: 'Naukri searches' }), h('ul', { id: 's-searches', class: 'timeline' }))),
+      h('div', { class: 'step' }, h('div', { class: 'step-n', text: '3' }), h('div', { class: 'step-body' },
+        h('h3', { text: 'Where' }),
+        area('s-locs', (has(prefs.locations) ? prefs.locations : sug.locations).join('\n'), 'one city per line, e.g. Pune', 2),
+        h('div', {}, chk('s-any', 'Any location', prefs.savedAt && prefs.anyLocation && !has(prefs.locations)), chk('s-remote', 'Remote is fine', (prefs.workModes || []).includes('remote'))))),
+      moreDetails(draft, prefs, data.max),
+      h('div', { class: 'save-bar' }, h('button', { class: 'primary big', id: 'setup-save', text: 'Save', onclick: save }), h('span', { id: 'save-status', class: 'muted' })));
+    renderResume();
+    for (const id of ['s-titles', 's-keywords', 's-locs']) $(id).addEventListener('input', () => { $(id).dataset.touched = '1'; if (id === 's-titles') preview(); });
+    $('s-expmin').addEventListener('input', preview);
     preview();
   }
   window.ApplyItSetup = { load };

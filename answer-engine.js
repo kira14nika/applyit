@@ -16,6 +16,7 @@
  *   node answer-engine.js --check      test Gemini and Groq separately
  */
 const { GEMINI_DEFAULT_MODEL, createAi, aiConfig } = require('./ai-providers');
+const { findSaved } = require('./question-inbox');
 const DEFAULT_MODEL = GEMINI_DEFAULT_MODEL;
 const DEFAULT_WORK_AUTH = 'Authorized to work in my country of residence.'; // config.js default, not user data
 
@@ -150,16 +151,30 @@ function validate(out, { options = [], numeric = false } = {}) {
   return { status: 'answered', answer, evidence, source: 'ai' };
 }
 
-/** Full pipeline for one question from the page. */
-async function answer(q, { facts = {}, ai = null } = {}) {
+/**
+ * Full pipeline for one question from the page. `saved` = the user's inbox choices
+ * ({answeredByYou, dontAnswer} from profile.json): "don't answer" → unknown right away
+ * (the job keeps being skipped, no AI call); a saved answer is used when the SAME
+ * validation as every AI answer accepts it for this question; saved answers are also
+ * given to the AI as facts (source "answered by you").
+ */
+async function answer(q, { facts = {}, ai = null, saved = null } = {}) {
   const question = String(q?.question || '').trim();
   const options = Array.isArray(q?.options) ? q.options.map((o) => String(o).trim()).filter(Boolean) : [];
   if (!question) return { status: 'unknown', category: 'unexpected-behaviour', missing: 'no question text could be read' };
   const numeric = !!q?.numeric || (!options.length && looksNumeric(question));
   const req = { question, options, numeric, job: q?.job || {} };
+  const mine = saved ? findSaved(question, options, saved) : null;
+  if (mine && mine.type === 'dont') return { status: 'unknown', category: 'unanswerable-question', missing: 'you chose not to answer this question' };
+  if (mine && mine.type === 'answer') {
+    const v = validate({ status: 'answered', answer: mine.entry.answer, evidence: 'answered by you' }, req);
+    if (v.status === 'answered') return { ...v, source: 'user' };
+  }
   const fact = factLookup(question, facts, { numeric });
   if (fact && (!options.length || options.includes(fact.answer))) return fact;
-  return askAi(req, relevantFacts(facts, question), ai);
+  const withSaved = saved && (saved.answeredByYou || []).length
+    ? { ...facts, answeredByYou: saved.answeredByYou.map((a) => ({ question: a.question, answer: a.answer })) } : facts;
+  return askAi(req, relevantFacts(withSaved, question), ai);
 }
 
 module.exports = { DEFAULT_MODEL, buildFacts, relevantFacts, factLookup, validate, askAi, answer, buildPrompt };
