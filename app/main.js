@@ -146,8 +146,10 @@ ipcMain.handle('setup:load', () => {
     appFacts: resumeProfile.APP_FACTS.map(({ key, label }) => ({ key, label })),
     // where each application fact currently comes from (setup / resume / env / none)
     factSources: resumeProfile.applicationFacts(profile, prefs, cfg().CV).sources,
-    // pre-fill for the 3 required steps: titles / keywords / locations from the resume
+    // pre-fill for the 3 required steps: titles / keywords / cities from the resume
     suggestions: resumeProfile.suggestPreferences(profile),
+    // the ONLY Naukri filter values the Setup page may offer (docs/NAUKRI-FILTERS.md)
+    filters: (() => { const F = require('../naukri-filters'); return { cities: F.CITIES, salary: F.SALARY, freshness: F.FRESHNESS, experience: F.EXPERIENCE }; })(),
   };
 });
 ipcMain.handle('setup:pickResume', async () => {
@@ -242,7 +244,8 @@ function selftestOnEvent(m) {
   if (!st) return;
   const s = m.event.state;
   st.seen.push(s);
-  if (st.step === 'wait-job' && ['would-apply', 'deferred'].includes(s)) { st.step = 'pausing'; control('pause'); }
+  // pause as soon as the first results page loads — independent of whether this search has jobs
+  if (st.step === 'wait-job' && s === 'loading-results') { st.step = 'pausing'; control('pause'); }
   else if (st.step === 'pausing' && s === 'paused') {
     st.step = 'paused';
     setTimeout(async () => {
@@ -262,13 +265,13 @@ async function selftestOnExit(code) {
   // Setup path inside Electron: pdfjs extraction of the configured resume (read-only, length only)
   let resumeChars = null;
   try { const rf = cfg().resumePath; if (rf && fs.existsSync(rf)) resumeChars = (await resumeProfile.extractPdfText(rf)).length; } catch (e) { resumeChars = `error: ${e.message}`; }
-  ui.setupLoaded = await win.webContents.executeJavaScript("document.querySelector('.nav-btn[data-page=\"setup\"]').click(); new Promise(r => setTimeout(() => r(!!(document.getElementById('s-titles') && document.getElementById('s-locs') && document.getElementById('setup-save') && document.querySelector('details#more:not([open])'))), 1500))").catch(() => false);
+  ui.setupLoaded = await win.webContents.executeJavaScript("document.querySelector('.nav-btn[data-page=\"setup\"]').click(); new Promise(r => setTimeout(() => r(!!(document.getElementById('s-titles') && document.getElementById('s-cities') && document.getElementById('s-jobage') && document.getElementById('setup-save') && document.querySelector('details#more:not([open])'))), 1500))").catch(() => false);
   ui.inboxShown = await win.webContents.executeJavaScript("!!document.getElementById('inbox-count') && document.getElementById('inbox-count').textContent !== ''").catch(() => false);
   ui.advancedDefaultsOff = await win.webContents.executeJavaScript("document.querySelector('.nav-btn[data-page=\"settings\"]').click(); new Promise(r => setTimeout(() => r(!!document.getElementById('advanced') && !document.getElementById('advanced').open), 800))").catch(() => false);
   ui.resumeChars = resumeChars;
-  const need = ['starting', 'searching', 'checking-job', 'paused', 'resumed', 'stopped'];
+  const need = ['starting', 'searching', 'loading-results', 'paused', 'resumed', 'stopped'];
   const missing = need.filter((s) => !st.seen.includes(s));
-  const ok = code === 0 && !missing.length && /PAUSED/i.test(st.pausedUi || '') && /STOPPED/i.test(ui.state || '') && ui.events > 5
+  const ok = code === 0 && !missing.length && /PAUSED/i.test(st.pausedUi || '') && /STOPPED/i.test(ui.state || '') && ui.events >= 5
     && ui.setupLoaded === true && ui.inboxShown === true && ui.advancedDefaultsOff === true
     && (resumeChars === null || typeof resumeChars === 'number') && st.refused === true;
   ui.testLiveRefusedWithoutAi = st.refused;
@@ -293,6 +296,11 @@ async function selftestOnExit(code) {
     await win.webContents.executeJavaScript(`document.querySelector('.nav-btn[data-page="settings"]').click(); document.getElementById('advanced').open = true;`);
     await new Promise((r) => setTimeout(r, 600));
     fs.writeFileSync(path.join(cap, 'app-settings-advanced.png'), (await win.webContents.capturePage()).toPNG());
+    await win.webContents.executeJavaScript(`document.querySelector('.nav-btn[data-page="setup"]').click();`);
+    await new Promise((r) => setTimeout(r, 1500));
+    await win.webContents.executeJavaScript(`document.getElementById('s-titles').scrollIntoView({ block: 'start' });`);
+    await new Promise((r) => setTimeout(r, 500));
+    fs.writeFileSync(path.join(cap, 'app-setup-filters.png'), (await win.webContents.capturePage()).toPNG());
   }
   selftestDone(ok, JSON.stringify({ runnerExit: code, missing, pausedUi: st.pausedUi, ui, states: [...new Set(st.seen)] }));
 }

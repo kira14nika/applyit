@@ -189,7 +189,10 @@ function factsFor(profile, prefs = null, cv = {}) {
     });
   }
   Object.assign(f, applicationFacts(profile, prefs, cv).facts);
-  if (prefs && (prefs.locations || []).length) f.preferredLocations = prefs.locations.join(', ');
+  if (prefs && !prefs.anyLocation && (prefs.cities || []).length) {
+    const F = require('./naukri-filters');
+    f.preferredLocations = prefs.cities.map((g) => (F.cityByGid(g) || {}).name).filter(Boolean).join(', ');
+  }
   return strip(f);
 }
 function strip(o) {
@@ -203,19 +206,18 @@ function strip(o) {
  * comes from the profile itself — nothing is suggested that the resume doesn't say.
  */
 function suggestPreferences(profile) {
-  if (!profile) return { titles: [], keywords: [], locations: [] };
+  if (!profile) return { titles: [], keywords: [], cities: [] };
   const jobs = [...(profile.jobs || [])].sort((a, b) =>
     Number(/present|current|now|till date/i.test(b.end || '')) - Number(/present|current|now|till date/i.test(a.end || '')));
   const seen = new Set();
   const titles = [];
-  for (const j of jobs) {
-    const t = String(j.title || '').trim();
-    if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); titles.push(t); }
-    if (titles.length === 3) break;
-  }
+  const add = (t) => { t = String(t || '').trim(); if (t && t.length <= 60 && /[a-z]/i.test(t) && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); titles.push(t); } };
+  add(String(profile.headline || '').split(/[|,•·]/)[0]); // "Data Analyst | SQL | Power BI" → "Data Analyst"
+  for (const j of jobs) { if (titles.length >= 3) break; add(j.title); }
   const keywords = [...new Set((profile.skills || []).map((s) => String(s).trim()).filter(Boolean))].slice(0, 5);
-  const loc = String((profile.userProvided && profile.userProvided.currentLocation) || profile.location || '').split(',')[0].trim();
-  return { titles, keywords, locations: loc ? [loc] : [] };
+  // only a city Naukri's filter confirms (docs/NAUKRI-FILTERS.md)
+  const city = require('./naukri-filters').cityByName((profile.userProvided && profile.userProvided.currentLocation) || profile.location || '');
+  return { titles: titles.slice(0, 3), keywords, cities: city ? [city.gid] : [] };
 }
 
 module.exports = { PROFILE, APP_FACTS, suggestPreferences, extractPdfText, grounded, groundProfile, buildProfile, load, save, applicationFacts, factsFor };

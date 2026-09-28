@@ -280,7 +280,7 @@ function buildInjection(max = TARGET) {
       // Setup preferences: title words and locations filter cards (never URL params)
       ...(PREFS ? {
         titleFilter: require('./preferences').titleFilter(PREFS),
-        locationFilter: PREFS.anyLocation ? null : { locations: PREFS.locations, remote: PREFS.workModes.includes('remote') },
+        locationFilter: require('./preferences').locationFilter(PREFS),
       } : {}),
     } : { CV, geminiKey }) })};
     ${run ? `window.__aaJobId = ${require('./naukri-ledger').jobId.toString()};` : ''}

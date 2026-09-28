@@ -44,12 +44,12 @@ test('AI: invented skills are removed; off-contract output falls back to rules',
   assert.strictEqual(down.source, 'rules');
 });
 
-test('AI matching and the threshold both default OFF; the threshold only flags', () => {
-  assert.deepStrictEqual(P.normalize({}).matching, { aiEnabled: false, thresholdEnabled: false, threshold: 60 });
+test('AI matching defaults OFF; threshold defaults ON at 50%', () => {
+  assert.deepStrictEqual(P.normalize({}).matching, { aiEnabled: false, thresholdEnabled: true, threshold: 50 }, 'AI matching off; low-match gate on at 50%');
   const runner = require('fs').readFileSync(require('path').join(__dirname, 'auto-apply-runner.js'), 'utf8');
   assert.ok(runner.includes('if (AI && PREFS && PREFS.matching && PREFS.matching.aiEnabled) {'), 'no AI call for matching unless the setting is on');
   const low = { score: 30, decision: 'weak-match' };
-  assert.strictEqual(M.applyThreshold(low, P.normalize({})).belowThreshold, false, 'off → no flag');
+  assert.strictEqual(M.applyThreshold(low, P.normalize({ matching: { thresholdEnabled: false } })).belowThreshold, false, 'off → no flag');
   const flagged = M.applyThreshold(low, P.normalize({ matching: { thresholdEnabled: true, threshold: 50 } }));
   assert.strictEqual(flagged.belowThreshold, true);
   assert.ok(!['skip', 'reject'].includes(flagged.decision));

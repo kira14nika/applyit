@@ -107,8 +107,8 @@ test('Setup pre-fill comes only from the resume profile', () => {
     location: 'Pune, Maharashtra', skills: ['SQL', 'Power BI', 'Excel', 'Python', 'Tableau', 'DAX'],
     jobs: [{ title: 'Junior Analyst', end: '2021' }, { title: 'Data Analyst', end: 'Present' }, { title: 'data analyst', end: '2020' }],
   });
-  assert.deepStrictEqual(s, { titles: ['Data Analyst', 'Junior Analyst'], keywords: ['SQL', 'Power BI', 'Excel', 'Python', 'Tableau'], locations: ['Pune'] });
-  assert.deepStrictEqual(R.suggestPreferences(null), { titles: [], keywords: [], locations: [] });
+  assert.deepStrictEqual(s, { titles: ['Data Analyst', 'Junior Analyst'], keywords: ['SQL', 'Power BI', 'Excel', 'Python', 'Tableau'], cities: [139] });
+  assert.deepStrictEqual(R.suggestPreferences(null), { titles: [], keywords: [], cities: [] });
 });
 
 test('the runner hands the saved answers to the answer engine', () => {

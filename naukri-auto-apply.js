@@ -153,6 +153,7 @@
     chatSendText: /^send$|^save$|^submit$|^ok$|^done$/i,
     chatOption: '[class*="chatbot" i] label, [class*="chip" i], [class*="radio" i] label, [class*="checkbox" i] label',
     nextPageText: /^next$/i,
+    noResults: '[class*="no-result-container" i]',
   };
 
   // ======================= CROSS-PASTE STATE =======================
@@ -423,11 +424,20 @@
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if ([...document.querySelectorAll(SELECTORS.jobCards)].filter(visible).length) return true;
+      // Naukri's empty-search page (measured 2026-09-28): "No results found"
+      if ([...document.querySelectorAll(SELECTORS.noResults)].some(visible)) return 'empty';
       await sleep(500);
     }
     return false;
   };
-  if (!(await waitForCards())) {
+  const cardsState = await waitForCards();
+  if (cardsState === 'empty') {
+    // an empty search is finished, not broken: the runner moves on to the next search
+    log('(this page: 0 cards — Naukri says "No results found" for this search)');
+    log('No more pages. Change your search and paste again.');
+    return;
+  }
+  if (!cardsState) {
     log('No job cards rendered after 30s — search page may have changed or been blocked.');
     return;
   }

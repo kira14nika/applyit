@@ -269,6 +269,26 @@ Settings > Advanced collapsed; captures include a display-only inbox sample.
 
 Note: with "AI matching" on, DRY runs also spend AI quota (one request per job).
 
+## Fix round from the DRY-run investigation
+
+### Part A — Naukri filters confirmed live ✅
+[NAUKRI-FILTERS.md](NAUKRI-FILTERS.md): `experience` (single 0–30), `jobAge` (1/3/7/15/30),
+`wfhType` (0 office / 2 remote / 3 hybrid, multi), `cityTypeGid` (28 cities, multi),
+`ctcFilter` (9 ranges, multi). A directly loaded URL with all of them is honoured.
+
+### Part B — Setup with confirmed filters ✅
+- `naukri-filters.js` holds exactly the confirmed values; `searchUrl()` drops anything else.
+- Setup step 2: job-title chips (pre-filled from the resume headline + recent titles).
+  Step 3: city chips from a searchable list of the 28 confirmed cities (native datalist,
+  no free text) + "Any location"; Remote/Hybrid/On-site; experience from/to (Naukri takes
+  one value → "from"); Posted within; optional salary ranges; live preview of the URLs.
+- One search per title with every selected filter. Old free-text locations migrate to
+  cities ("Pune, anywhere in india" → Pune); unknown words are listed, never used.
+- Empty searches: Naukri's "No results found" page now ends that search immediately (was:
+  30 s wait + restarts). Self-test pauses on the first results page, so it no longer
+  depends on live results.
+- Tests: `naukri-filters.test.js` (7).
+
 ## What's left
 See the final report and [CONTROLLED-TEST.md](CONTROLLED-TEST.md). Nothing in this
 build clicked Apply: TEST and LIVE are implemented and unit-tested but have not been run.

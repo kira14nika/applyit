@@ -46,8 +46,9 @@ function ruleMatch(job, facts = {}, prefs = null) {
     reasons.push(`experience asked ${range.min}–${range.max} yrs, you have ${yrs}: ${expFit ? 'fits' : 'outside the range'}`);
   } else reasons.push('experience fit unknown');
   let locFit = 0.5;
-  if (prefs && !prefs.anyLocation && prefs.locations.length && job.location) {
-    locFit = prefs.locations.some((l) => low(job.location).includes(low(l))) ? 1 : 0;
+  const lf = prefs ? require('./preferences').locationFilter(prefs) : null;
+  if (lf && job.location) {
+    locFit = lf.locations.some((l) => low(job.location).includes(low(l))) || (lf.remote && /remote|work from home/i.test(job.location)) ? 1 : 0;
     reasons.push(`location ${job.location}: ${locFit ? 'preferred' : 'not in your preferred locations'}`);
   }
   const score = Math.round(100 * (0.7 * skillFit + 0.2 * expFit + 0.1 * locFit));
@@ -67,7 +68,7 @@ async function aiMatch(job, facts = {}, prefs = null, opts = {}) {
   if (!opts.ai) return base;
   const candidate = { skills: facts.skills, employmentHistory: facts.employmentHistory, education: facts.education,
     certifications: facts.certifications, projects: facts.projects, totalExperience: facts.totalExperience, currentRole: facts.currentRole };
-  const res = await opts.ai.askJson(`${PROMPT}\n\n${JSON.stringify({ CANDIDATE: candidate, JOB: job, PREFERENCES: prefs ? { locations: prefs.locations, workModes: prefs.workModes, experience: prefs.experience, salary: prefs.salary } : {} })}`, { purpose: 'match' });
+  const res = await opts.ai.askJson(`${PROMPT}\n\n${JSON.stringify({ CANDIDATE: candidate, JOB: job, PREFERENCES: prefs ? { cities: (prefs.cities || []).map((g) => (require('./naukri-filters').cityByGid(g) || {}).name), workModes: prefs.workModes, experience: prefs.experience, salaryRanges: prefs.salaryRanges } : {} })}`, { purpose: 'match' });
   if (!res.ok) return { ...base, aiError: res.error };
   const o = res.json || {};
   const score = Number(o.score);

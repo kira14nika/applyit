@@ -1,4 +1,5 @@
-/* ApplyIt Setup — 3 required steps (resume, job titles, locations), everything else optional.
+/* ApplyIt Setup — 3 required steps (resume, job titles, where/how), everything else optional.
+   Step 3 offers ONLY the Naukri filters confirmed in docs/NAUKRI-FILTERS.md.
    Data is inserted with textContent only. */
 'use strict';
 (() => {
@@ -23,6 +24,8 @@
   let data = null;   // setup:load result
   let draft = null;  // profile being shown / edited (keeps resumeText, resumeFile)
   let dirtyProfile = false;
+  let titles = null; // chip lists
+  let cities = null;
 
   // ---------------------------------------------------------------- step 1: resume summary
   function summary(p) {
@@ -85,20 +88,46 @@
     dirtyProfile = true;
     $('r-status').textContent = `Read (${r.ai}). Check the summary, confirm steps 2 and 3, then Save.`;
     renderResume(r.dropped);
-    // re-suggest from the new resume unless the user already typed something
-    const sug = suggestFrom(draft);
-    if (!$('s-titles').dataset.touched) $('s-titles').value = sug.titles.join('\n');
-    if (!$('s-keywords').dataset.touched) $('s-keywords').value = sug.keywords.join(', ');
-    if (!$('s-locs').dataset.touched) $('s-locs').value = sug.locations.join('\n');
+    const sug = suggestFrom(draft); // re-suggest unless the user already changed the chips
+    if (!titles.touched) titles.set(sug.titles);
+    if (!cities.touched) cities.set(sug.cities);
     preview();
   }
   // same rule as resume-profile.js suggestPreferences(), for a freshly extracted draft
   function suggestFrom(p) {
     const cur = (j) => /present|current|now|till date/i.test(j.end || '');
     const jobs = [...(p.jobs || [])].sort((a, b) => Number(cur(b)) - Number(cur(a)));
-    const titles = [...new Map(jobs.filter((j) => j.title).map((j) => [j.title.toLowerCase(), j.title])).values()].slice(0, 3);
-    const loc = String((p.userProvided && p.userProvided.currentLocation) || p.location || '').split(',')[0].trim();
-    return { titles, keywords: [...new Set(p.skills || [])].slice(0, 5), locations: loc ? [loc] : [] };
+    const out = [];
+    const add = (t) => { t = String(t || '').trim(); if (t && t.length <= 60 && /[a-z]/i.test(t) && !out.some((x) => x.toLowerCase() === t.toLowerCase())) out.push(t); };
+    add(String(p.headline || '').split(/[|,•·]/)[0]);
+    for (const j of jobs) { if (out.length >= 3) break; add(j.title); }
+    const c = cityByName((p.userProvided && p.userProvided.currentLocation) || p.location || '');
+    return { titles: out.slice(0, 3), cities: c ? [c.gid] : [] };
+  }
+  const cityByName = (t0) => {
+    const t = String(t0 || '').trim().toLowerCase(); if (!t) return null;
+    const head = t.split(/[,(]/)[0].trim();
+    return data.filters.cities.find((c) => c.name.toLowerCase() === t) || data.filters.cities.find((c) => c.name.toLowerCase() === head) || null;
+  };
+  const cityName = (gid) => (data.filters.cities.find((c) => c.gid === gid) || {}).name || String(gid);
+
+  // ---------------------------------------------------------------- removable chips
+  function chips(id, initial, label) {
+    const state = { items: [...initial], touched: false };
+    const box = h('div', { class: 'chipbox', id });
+    const render = () => {
+      box.textContent = '';
+      if (!state.items.length) box.append(h('span', { class: 'muted', text: 'none yet' }));
+      for (const it of state.items) {
+        box.append(h('span', { class: 'chip-x' }, label(it),
+          h('button', { class: 'x', title: 'Remove', text: '×', onclick: () => { state.items = state.items.filter((x) => x !== it); state.touched = true; render(); preview(); } })));
+      }
+    };
+    state.add = (it) => { if (it != null && it !== '' && !state.items.includes(it)) { state.items.push(it); state.touched = true; render(); preview(); } };
+    state.set = (arr) => { state.items = [...arr]; render(); };
+    state.el = box;
+    render();
+    return state;
   }
 
   // ---------------------------------------------------------------- optional details
@@ -113,30 +142,66 @@
   }
   function moreDetails(p, prefs, max) {
     const u = (p && p.userProvided) || {};
-    const modes = prefs.workModes || [];
     const rel = h('select', { id: 's-reloc' }, ['unspecified', 'yes', 'no'].map((v) => { const o = h('option', { value: v, text: v }); if (v === prefs.relocation) o.selected = true; return o; }));
     return h('details', { id: 'more', class: 'more' }, h('summary', { text: 'More details (optional)' }),
       h('p', { class: 'note', text: 'Only needed when job questions ask for them — anything unanswered comes to your "Needs your answer" inbox instead. Empty fields fall back to .env.' }),
       data.appFacts.map((f) => row(f.label, h('div', {}, text(`u-${f.key}`, u[f.key] || ''), h('div', { class: 'note', 'data-hint': f.key, text: hint(f.key) })))),
       row('Total experience (years)', text('u-totalExperienceYears', u.totalExperienceYears, 'e.g. 3')),
-      row('Also OK', h('div', {}, chk('s-hybrid', 'Hybrid', modes.includes('hybrid')), chk('s-onsite', 'On-site', modes.includes('on-site')))),
       row('Willing to relocate', rel),
-      row('Salary range (lakhs/yr)', h('div', { class: 'pair' }, text('s-salmin', prefs.salary && prefs.salary.min, 'min'), text('s-salmax', prefs.salary && prefs.salary.max, 'max'))),
-      row('Experience range (years)', h('div', { class: 'pair' }, text('s-expmin', prefs.experience && prefs.experience.min, 'min (also used in searches)'), text('s-expmax', prefs.experience && prefs.experience.max, 'max'))),
+      row('Also accept titles containing', text('s-keywords', (prefs.includeKeywords || []).join(', '), 'optional, comma separated')),
       row('Title must NOT include', area('s-excl', (prefs.excludeKeywords || []).join('\n'), 'one per line (added to the built-in blocklist)', 2)),
       row(`Max per run (≤ ${max.perRun})`, text('s-perrun', (prefs.limits && prefs.limits.perRun) || max.perRun)),
       row(`Max per day (≤ ${max.daily})`, text('s-daily', (prefs.limits && prefs.limits.daily) || max.daily)));
   }
 
-  // ---------------------------------------------------------------- save
+  // ---------------------------------------------------------------- step 3: confirmed Naukri filters only
+  function whereAndHow(prefs) {
+    const F = data.filters;
+    const dl = h('datalist', { id: 'naukri-cities' }, F.cities.map((c) => h('option', { value: c.name })));
+    const input = h('input', { id: 's-city', list: 'naukri-cities', placeholder: 'Type a city, pick it from the list' });
+    const err = h('span', { class: 'q-error', id: 's-city-err' });
+    const pick = () => {
+      const v = input.value.trim();
+      if (!v) return;
+      const c = F.cities.find((x) => x.name.toLowerCase() === v.toLowerCase());
+      if (!c) { err.textContent = `"${v}" is not one of Naukri's location filters — pick one from the list.`; return; }
+      err.textContent = ''; input.value = ''; $('s-any').checked = false; cities.add(c.gid);
+    };
+    input.addEventListener('change', pick);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); pick(); } });
+    const any = chk('s-any', 'Any location', !cities.items.length);
+    any.querySelector('input').addEventListener('change', (e) => { if (e.target.checked) { cities.set([]); cities.touched = true; } preview(); });
+    const expSel = (id, val, anyLabel) => h('select', { id }, [h('option', { value: '', text: anyLabel }),
+      ...Array.from({ length: F.experience.max - F.experience.min + 1 }, (_, i) => { const o = h('option', { value: String(i), text: `${i} yrs` }); if (val === i) o.selected = true; return o; })]);
+    const fresh = h('select', { id: 's-jobage' }, [h('option', { value: '', text: 'Any time' }),
+      ...F.freshness.map((d) => { const o = h('option', { value: String(d), text: d === 1 ? 'Last 1 day' : `Last ${d} days` }); if (prefs.jobAge === d) o.selected = true; return o; })]);
+    const salary = h('div', { class: 'salary-grid' }, F.salary.map((s) => chk(`s-sal-${s.value}`, s.label, (prefs.salaryRanges || []).includes(s.value))));
+    const modes = prefs.workModes || [];
+    const block = h('div', {},
+      h('div', { class: 'k', text: 'Cities' }), cities.el, h('div', {}, input, dl, ' ', err), any,
+      (prefs.unmatchedLocations || []).length ? h('p', { class: 'note', text: `Not a Naukri location filter, ignored: ${prefs.unmatchedLocations.join(', ')}` }) : null,
+      h('div', { class: 'k', style: 'margin-top:10px', text: 'Work mode' }),
+      h('div', {}, chk('s-remote', 'Remote', modes.includes('remote')), chk('s-hybrid', 'Hybrid', modes.includes('hybrid')), chk('s-onsite', 'On-site', modes.includes('on-site'))),
+      h('div', { class: 'filters-row' },
+        h('div', {}, h('div', { class: 'k', text: 'Experience (years)' }),
+          h('div', { class: 'pair' }, expSel('s-expmin', prefs.experience && prefs.experience.min, 'from: any'), expSel('s-expmax', prefs.experience && prefs.experience.max, 'to: any')),
+          h('div', { class: 'note', text: 'Naukri searches with one experience value, so the "from" year goes into the search; "to" is used when scoring jobs.' })),
+        h('div', {}, h('div', { class: 'k', text: 'Posted within' }), fresh)),
+      h('details', { class: 'salary-box' }, h('summary', { text: 'Salary (optional)' }), salary));
+    for (const el of block.querySelectorAll('input[type=checkbox], select')) el.addEventListener('change', preview);
+    return block;
+  }
+
+  // ---------------------------------------------------------------- save / preview
   function readPrefs() {
     const modes = [$('s-remote').checked && 'remote', $('s-hybrid').checked && 'hybrid', $('s-onsite').checked && 'on-site'].filter(Boolean);
     return {
-      titles: lines($('s-titles').value), includeKeywords: csv($('s-keywords').value),
-      locations: $('s-any').checked ? [] : lines($('s-locs').value), anyLocation: $('s-any').checked, workModes: modes,
-      relocation: $('s-reloc').value,
-      salary: { min: $('s-salmin').value, max: $('s-salmax').value }, experience: { min: $('s-expmin').value, max: $('s-expmax').value },
+      titles: titles.items, cities: $('s-any').checked ? [] : cities.items, anyLocation: $('s-any').checked, workModes: modes,
+      experience: { min: $('s-expmin').value, max: $('s-expmax').value }, jobAge: $('s-jobage').value,
+      salaryRanges: data.filters.salary.filter((s) => $(`s-sal-${s.value}`).checked).map((s) => s.value),
+      relocation: $('s-reloc').value, includeKeywords: csv($('s-keywords').value),
       excludeKeywords: lines($('s-excl').value), limits: { perRun: $('s-perrun').value, daily: $('s-daily').value },
+      locations: [], // the old free-text field is replaced by cities
     };
   }
   function readUserProvided() {
@@ -145,8 +210,8 @@
   async function save() {
     if ($('edit-form')) { draft = readEdit(); dirtyProfile = true; }
     const prefs = readPrefs();
-    if (!prefs.titles.length) { $('save-status').textContent = 'Add at least one job title to search for (step 2).'; return; }
-    if (!prefs.anyLocation && !prefs.locations.length) { $('save-status').textContent = 'Add a location, or tick "Any location" (step 3).'; return; }
+    if (!prefs.titles.length) { $('save-status').textContent = 'Add at least one job title (step 2).'; return; }
+    if (!prefs.anyLocation && !prefs.cities.length) { $('save-status').textContent = 'Pick a city, or tick "Any location" (step 3).'; return; }
     const up = readUserProvided();
     const upChanged = Object.entries(up).some(([k, v]) => String(v || '') !== String(((data.profile || {}).userProvided || {})[k] || ''));
     if (dirtyProfile || upChanged) await S.saveProfile({ ...(draft || {}), userProvided: up });
@@ -156,9 +221,11 @@
     refreshHints();
   }
   async function preview() {
-    const urls = await S.previewSearches({ titles: lines($('s-titles').value), experience: { min: $('s-expmin') ? $('s-expmin').value : '' } });
-    const ul = $('s-searches'); ul.textContent = '';
-    for (const u of urls) ul.append(h('li', { text: u }));
+    if (!titles || !$('s-jobage')) return;
+    const urls = await S.previewSearches(readPrefs());
+    const ul = $('s-searches');
+    ul.textContent = '';
+    for (const u of urls) ul.append(h('li', { class: 'url', text: u }));
     if (!urls.length) ul.append(h('li', { class: 'muted', text: 'Add a job title to create a search.' }));
   }
   async function refreshHints() {
@@ -173,8 +240,12 @@
     draft = data.profile || null;
     dirtyProfile = false;
     const prefs = data.prefs || { limits: {} };
-    const sug = data.suggestions || { titles: [], keywords: [], locations: [] };
+    const sug = data.suggestions || { titles: [], keywords: [], cities: [] };
     const has = (a) => Array.isArray(a) && a.length;
+    titles = chips('s-titles', has(prefs.titles) ? prefs.titles : sug.titles, (t) => t);
+    cities = chips('s-cities', prefs.savedAt ? (prefs.cities || []) : sug.cities, cityName);
+    const titleInput = h('input', { id: 's-title-add', placeholder: 'Add a job title, then press Enter' });
+    titleInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); titles.add(titleInput.value.trim()); titleInput.value = ''; } });
     const root = $('setup-root');
     root.textContent = '';
     root.append(
@@ -185,21 +256,15 @@
           h('span', { id: 'r-status', class: 'muted', style: 'margin-left:10px', text: data.hasKey ? `Read by AI (${data.model}); only what is written in your resume is kept.` : 'No AI key: the text is read and email/phone found — use "Enter details by hand" for the rest.' })),
         h('div', { id: 'resume-box' }))),
       h('div', { class: 'step' }, h('div', { class: 'step-n', text: '2' }), h('div', { class: 'step-body' },
-        h('h3', { text: 'Jobs to look for' }),
-        h('p', { class: 'note', text: has(prefs.titles) ? 'Your saved titles.' : sug.titles.length ? 'Suggested from your resume — confirm or edit.' : 'One job title per line.' }),
-        area('s-titles', (has(prefs.titles) ? prefs.titles : sug.titles).join('\n'), 'e.g. Data Analyst', 3),
-        h('div', { class: 'k', style: 'margin-top:8px', text: 'Keywords (optional) — a job title may contain one of these instead' }),
-        text('s-keywords', (has(prefs.includeKeywords) ? prefs.includeKeywords : sug.keywords).join(', '), 'e.g. Power BI, SQL'),
-        h('div', { class: 'k', style: 'margin-top:8px', text: 'Naukri searches' }), h('ul', { id: 's-searches', class: 'timeline' }))),
+        h('h3', { text: 'Job titles' }),
+        h('p', { class: 'note', text: has(prefs.titles) ? 'Your saved titles — one Naukri search each.' : sug.titles.length ? 'Suggested from your resume — remove or add as needed.' : 'Add the job titles to search for.' }),
+        titles.el, titleInput)),
       h('div', { class: 'step' }, h('div', { class: 'step-n', text: '3' }), h('div', { class: 'step-body' },
-        h('h3', { text: 'Where' }),
-        area('s-locs', (has(prefs.locations) ? prefs.locations : sug.locations).join('\n'), 'one city per line, e.g. Pune', 2),
-        h('div', {}, chk('s-any', 'Any location', prefs.savedAt && prefs.anyLocation && !has(prefs.locations)), chk('s-remote', 'Remote is fine', (prefs.workModes || []).includes('remote'))))),
+        h('h3', { text: 'Where and how' }), whereAndHow(prefs),
+        h('div', { class: 'k', style: 'margin-top:10px', text: 'Naukri searches that will be used' }), h('ul', { id: 's-searches', class: 'timeline' }))),
       moreDetails(draft, prefs, data.max),
       h('div', { class: 'save-bar' }, h('button', { class: 'primary big', id: 'setup-save', text: 'Save', onclick: save }), h('span', { id: 'save-status', class: 'muted' })));
     renderResume();
-    for (const id of ['s-titles', 's-keywords', 's-locs']) $(id).addEventListener('input', () => { $(id).dataset.touched = '1'; if (id === 's-titles') preview(); });
-    $('s-expmin').addEventListener('input', preview);
     preview();
   }
   window.ApplyItSetup = { load };
